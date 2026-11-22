@@ -1,0 +1,5 @@
+﻿numero_peito;nome;modalidade;tempo_bruto;tempo_liquido;situacao
+1;Nome do Atleta;5 km;00:25:31;00:25:10;CONCLUIU
+2;Outra Atleta;10 km;;;NAO_LARGOU
+3;Mais Um Atleta;10 km;00:58:02;00:57:40;NAO_CONCLUIU
+4;Atleta Exemplo;5 km;00:30:00;00:29:41;DESCLASSIFICADO
