@@ -21,6 +21,31 @@ async function createApp() {
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     next();
   });
+  // ---------- App instalável (PWA) ----------
+  const { APP_NAME, ASSET_V } = require('./views/layout');
+  app.get('/manifest.webmanifest', (req, res) => {
+    res.type('application/manifest+json').set('Cache-Control', 'public, max-age=3600').send(JSON.stringify({
+      name: APP_NAME, short_name: APP_NAME, lang: 'pt-BR', dir: 'ltr',
+      description: 'Inscrições em corridas e eventos esportivos, kit, resultados e certificados.',
+      id: '/', start_url: '/?origem=app', scope: '/', display: 'standalone', orientation: 'portrait',
+      background_color: '#0b0b0b', theme_color: '#0b0b0b', categories: ['sports', 'lifestyle'],
+      icons: [
+        { src: '/static/img/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+        { src: '/static/img/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+        { src: '/static/img/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+      ],
+      shortcuts: [
+        { name: 'Eventos', url: '/eventos', icons: [{ src: '/static/img/icon-192.png', sizes: '192x192' }] },
+        { name: 'Minhas inscrições', url: '/minha-conta', icons: [{ src: '/static/img/icon-192.png', sizes: '192x192' }] },
+      ],
+    }));
+  });
+  const swSource = require('node:fs').readFileSync(path.join(config.root, 'public', 'sw.js'), 'utf8').replaceAll('__VERSION__', ASSET_V);
+  app.get('/sw.js', (req, res) => res.type('application/javascript').set({ 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/' }).send(swSource));
+  app.get('/favicon.ico', (req, res) => res.redirect(301, '/static/img/favicon-32.png'));
+  app.get('/offline', (req, res) => res.set('Cache-Control', 'no-cache').send(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b0b0b"><title>Sem conexão · ${APP_NAME}</title><link rel="stylesheet" href="/static/css/app.css?v=${ASSET_V}"></head>
+<body class="offline-page"><main class="offline-box"><img src="/static/img/icon-192.png" alt="" width="96" height="96"><h1>Sem conexão</h1><p>Você está sem internet. Inscrições, pagamentos e resultados precisam de conexão para mostrar informações atualizadas.</p><button class="btn btn-lg" onclick="location.reload()">Tentar de novo</button></main></body></html>`));
+
   app.use('/static', express.static(path.join(config.root, 'public'), { maxAge: config.isProd ? '7d' : 0 }));
   app.use('/media', express.static(config.publicUploadDir, { maxAge: '1d' })); // somente arquivos públicos (logos, capas)
 

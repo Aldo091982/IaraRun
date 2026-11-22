@@ -36,6 +36,51 @@
     inp.addEventListener('change', upd); upd();
   });
 
+  // ---------- App instalável (PWA) ----------
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
+  const store = { get: (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* sem armazenamento */ } } };
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isIOSSafari = isIOS && /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|GSA/.test(ua);
+  const banner = $('[data-install-banner]');
+  const sheet = $('[data-ios-sheet]');
+  const installBtns = $$('[data-install]');
+  let deferred = null;
+  const dismissedRecently = () => Number(store.get('install-dismissed') || 0) > Date.now() - 7 * 864e5;
+  const showInstall = (withBanner) => {
+    installBtns.forEach((b) => { b.hidden = false; });
+    if (banner && withBanner && !dismissedRecently() && !$('.cookie')) banner.hidden = false; // não disputa espaço com o aviso de cookies
+  };
+  if (!standalone) {
+    // Android/Chrome/Edge: o navegador avisa quando o app pode ser instalado
+    window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferred = e; showInstall(true); });
+    // iPhone/iPad: não há aviso automático; mostramos as instruções do Safari
+    if (isIOS) {
+      if (!isIOSSafari) { const hint = $('[data-install-hint]'); if (hint) hint.textContent = 'Abra este site no Safari para instalar na tela de início.'; }
+      showInstall(true);
+    }
+  }
+  installBtns.forEach((b) => b.addEventListener('click', async () => {
+    if (deferred) {
+      deferred.prompt();
+      const choice = await deferred.userChoice.catch(() => null);
+      deferred = null;
+      if (choice && choice.outcome === 'accepted') { if (banner) banner.hidden = true; installBtns.forEach((x) => { x.hidden = true; }); }
+    } else if (isIOS && sheet) {
+      sheet.hidden = false;
+    }
+  }));
+  const closeBanner = $('[data-install-close]');
+  if (closeBanner) closeBanner.addEventListener('click', () => { banner.hidden = true; store.set('install-dismissed', String(Date.now())); });
+  const closeSheet = $('[data-ios-close]');
+  if (closeSheet) closeSheet.addEventListener('click', () => { sheet.hidden = true; });
+  if (sheet) sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.hidden = true; });
+  window.addEventListener('appinstalled', () => { if (banner) banner.hidden = true; installBtns.forEach((x) => { x.hidden = true; }); });
+  if (standalone) document.documentElement.classList.add('is-app');
+
   // Contagem regressiva da reserva
   $$('[data-countdown]').forEach((el) => {
     const end = new Date(el.dataset.countdown).getTime();
