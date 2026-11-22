@@ -4,6 +4,7 @@ const { expireStale, counts, currentLot, publicStatus } = require('./events');
 const { isCpf, digits, isEmail } = require('./docs');
 const { UserError, randomToken, code, nowIso, addMinutes, ageAt, json } = require('./util');
 const { sendMail, audit } = require('./core');
+const { kitBlockingItem } = require('./kitStock');
 
 async function assignCategory(eventId, modalityId, gender, birth, eventStartUtc) {
   const age = ageAt(birth, eventStartUtc);
@@ -77,6 +78,8 @@ async function createOrder({ user, eventId, participants, extras = [], couponCod
           if (!sz) throw new UserError(`${label}: escolha o tamanho da camiseta.`);
           if (await counts.size(kit.id, sz.size) >= sz.stock) throw new UserError(`${label}: camiseta tamanho ${sz.size} esgotada para o kit ${kit.name}.`, 409);
         }
+        const out = await kitBlockingItem(kit.id);
+        if (out) throw new UserError(`${label}: kit ${kit.name} esgotado (${out.name}).`, 409);
       } else if ((await db.one('SELECT COUNT(*) n FROM kits WHERE event_id=?', ev.id)).n > 0) {
         throw new UserError(`${label}: escolha o kit.`);
       }
@@ -157,14 +160,15 @@ async function confirmOrder(orderId, { free = false } = {}) {
       const ev = await db.one('SELECT * FROM events WHERE id=?', o.event_id);
       const regs = await db.all('SELECT * FROM registrations WHERE order_id=?', o.id);
       const items = await db.all('SELECT * FROM order_items WHERE order_id=?', o.id);
-      const problems = [];
+      const live = regs.filter((x) => ['reserved', 'expired'].includes(x.status)); const problems = [];
       if (ev.capacity != null && await counts.event(ev.id, o.id) + regs.length > ev.capacity) problems.push('capacidade do evento');
       for (const g of regs) {
         const m = await db.one('SELECT * FROM modalities WHERE id=?', g.modality_id);
         if (m.capacity != null && await counts.modality(m.id, o.id) + regs.filter((x) => x.modality_id === m.id).length > m.capacity) problems.push(`vagas de ${m.name}`);
         const l = await db.one('SELECT * FROM lots WHERE id=?', g.lot_id);
         if (l?.quantity != null && await counts.lot(l.id, o.id) + regs.filter((x) => x.lot_id === l.id).length > l.quantity) problems.push(`lote ${l.name}`);
-        if (g.kit_size) { const s = await db.one('SELECT stock FROM kit_sizes WHERE kit_id=? AND size=?', g.kit_id, g.kit_size); if (await counts.size(g.kit_id, g.kit_size, o.id) + 1 > s.stock) problems.push(`camiseta ${g.kit_size}`); }
+        if (g.kit_size) { const s = await db.one('SELECT stock FROM kit_sizes WHERE kit_id=? AND size=?', g.kit_id, g.kit_size); if (await counts.size(g.kit_id, g.kit_size, o.id) + live.filter((x) => x.kit_id === g.kit_id && x.kit_size === g.kit_size).length > s.stock) problems.push(`camiseta ${g.kit_size}`); }
+        if (g.kit_id) { const it = await kitBlockingItem(g.kit_id, live.filter((x) => x.kit_id === g.kit_id).length, o.id); if (it) problems.push(`kit (${it.name})`); }
         if (!ev.allow_duplicate && await db.one("SELECT 1 FROM registrations WHERE event_id=? AND cpf=? AND status IN ('reserved','confirmed') AND order_id<>?", ev.id, g.cpf, o.id)) problems.push('CPF já inscrito');
       }
       for (const it of items) { const v = await db.one('SELECT stock FROM product_variants WHERE id=?', it.variant_id); if (await counts.variant(it.variant_id, o.id) + it.qty > v.stock) problems.push('estoque de produto'); }

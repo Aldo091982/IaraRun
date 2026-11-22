@@ -7,6 +7,7 @@ const { fmtCpf } = require('../lib/docs');
 const { assertCan, can, eventForOrg } = require('../lib/orgs');
 const { publicStatus, PUBLIC_STATUS, eventStats } = require('../lib/events');
 const { cancelRegistration } = require('../lib/orders');
+const kitStock = require('../lib/kitStock');
 const payments = require('../lib/payments');
 const results = require('../lib/results');
 const { audit, sendMail } = require('../lib/core');
@@ -21,20 +22,21 @@ const REG_STATUS = { reserved: ['Reservada (aguardando pagamento)', 'warn'], con
 const REQ_TYPE = { cancel: 'Cancelamento com reembolso', modality: 'Troca de modalidade', shirt: 'Troca de camiseta', transfer: 'Transferência de titularidade' };
 async function ev(req, p) { const e = await eventForOrg(Number(req.params.id), req.org.id); if (p) assertCan(req.member, p, e.id); else if (req.member.eventIds && !req.member.eventIds.includes(e.id)) assertCan(req.member, '__none__', e.id); return e; }
 const tabs = async (req, e, active) => html`<p><a href="/organizador/eventos">← Eventos</a></p><div class="org-head"><div><h1>${e.name}</h1><p class="muted">${fmtDateTime(e.start_utc, e.timezone)} · ${e.city || ''}/${e.state || ''}</p></div>${badge(PUBLIC_STATUS[await publicStatus(e)].label, PUBLIC_STATUS[await publicStatus(e)].tone)}</div>
-<nav class="subnav" aria-label="Evento">${[['', 'Visão geral', null], ['/inscritos', 'Inscritos', 'registrations'], ['/solicitacoes', 'Solicitações', 'registrations'], ['/comunicacao', 'Comunicação', 'communication'], ['/checkin', 'Kits e check-in', 'kits'], ['/resultados', 'Resultados', 'timing']].filter(([, , p]) => !p || can(req.member, p, e.id)).map(([h, l]) => html`<a href="/organizador/eventos/${e.id}${h}" ${active === h ? raw('aria-current="page"') : ''}>${l}</a>`)}</nav>`;
+<nav class="subnav" aria-label="Evento">${[['', 'Visão geral', null], ['/inscritos', 'Inscritos', 'registrations'], ['/solicitacoes', 'Solicitações', 'registrations'], ['/comunicacao', 'Comunicação', 'communication'], ['/checkin', 'Kits e check-in', 'kits'], ['/estoque', 'Estoque do kit', 'kits'], ['/resultados', 'Resultados', 'timing']].filter(([, , p]) => !p || can(req.member, p, e.id)).map(([h, l]) => html`<a href="/organizador/eventos/${e.id}${h}" ${active === h ? raw('aria-current="page"') : ''}>${l}</a>`)}</nav>`;
 
 r.get('/eventos/:id', async (req, res) => {
   const e = await ev(req); const s = await eventStats(e.id);
   const mods = await db.all('SELECT m.*, (SELECT COUNT(*) FROM registrations g WHERE g.modality_id=m.id AND g.status=\'confirmed\') n FROM modalities m WHERE event_id=?', e.id);
   const exc = await db.all("SELECT x.*, o.code FROM payment_exceptions x JOIN orders o ON o.id=x.order_id WHERE o.event_id=? AND x.status='open'", e.id);
-  const sizes = await db.all("SELECT k.name, s.size, s.stock, (SELECT COUNT(*) FROM registrations g WHERE g.kit_id=k.id AND g.kit_size=s.size AND g.status IN ('reserved','confirmed')) used FROM kits k JOIN kit_sizes s ON s.kit_id=k.id WHERE k.event_id=?", e.id);
+  const stock = (await kitStock.stockRows(e.id)).flatMap((g) => g.rows.map((x) => ({ ...x, kit: g.kit.name })));
   const funnel = await db.one(`SELECT COUNT(*) started, SUM(CASE WHEN status IN ('paid','free') THEN 1 ELSE 0 END) done, SUM(CASE WHEN status='expired' THEN 1 ELSE 0 END) abandoned, SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending FROM orders WHERE event_id=? AND kind='registration'`, e.id);
   res.page({ title: e.name, wide: true, body: html`${await tabs(req, e, '')}
   ${exc.length ? html`<div class="alert alert-error"><strong>${exc.length} exceção(ões) de pagamento para resolver:</strong><ul>${exc.map((x) => html`<li>Pedido ${x.code}: ${x.reason}</li>`)}</ul>${can(req.member, 'finance', e.id) ? html`<a href="/organizador/eventos/${e.id}/solicitacoes">Resolver</a>` : ''}</div>` : ''}
   <section class="kpis"><div class="kpi"><span>Confirmadas</span><strong>${s.confirmed}</strong></div><div class="kpi"><span>Reservas em pagamento</span><strong>${s.reserved}</strong></div><div class="kpi"><span>Receita bruta confirmada</span><strong>${can(req.member, 'finance', e.id) ? brl(s.gross) : '—'}</strong></div><div class="kpi"><span>Cancel./reembolsos</span><strong>${s.cancelled}</strong></div><div class="kpi"><span>Kits entregues</span><strong>${s.kits_delivered}</strong></div><div class="kpi"><span>Solicitações abertas</span><strong>${s.open_requests}</strong></div></section>
   <p class="muted">Atualizado em ${fmtDateTime(nowIso(), e.timezone)} (recarregue para atualizar).</p>
   <div class="cols"><section class="card col-main"><h2>Vagas por modalidade</h2>${table(['Modalidade', 'Confirmadas', 'Limite'], mods.map((m) => [m.name, String(m.n), m.capacity ?? 'Sem limite']))}
-  <h2>Estoque de camisetas</h2>${table(['Kit', 'Tamanho', 'Reservado/vendido', 'Estoque'], sizes.map((x) => [x.name, x.size, String(x.used), String(x.stock)]))}
+  <h2>Estoque do kit</h2>${table(['Kit', 'Item', 'Reservado/vendido', 'Estoque', 'Disponível'], stock.map((x) => [x.kit, x.label, String(x.used), x.stock ?? 'Sem controle', html`${x.available ?? '—'} ${x.level ? badge(...x.level) : ''}`]), { emptyMsg: 'Nenhum kit com estoque cadastrado.' })}
+  ${can(req.member, 'kits', e.id) ? html`<p><a href="/organizador/eventos/${e.id}/estoque">Gerenciar estoque do kit →</a></p>` : ''}
   <h2>Conversão</h2><p class="muted">Pedidos iniciados no período do evento. "Abandono" = reserva expirada sem pagamento; difere de "pagamento pendente" (aguardando confirmação do provedor).</p>
   ${table(['Pedidos iniciados', 'Concluídos', 'Pendentes', 'Abandonados', 'Conversão'], [[String(funnel.started || 0), String(funnel.done || 0), String(funnel.pending || 0), String(funnel.abandoned || 0), funnel.started ? `${Math.round((funnel.done / funnel.started) * 100)}%` : '—']])}</section>
   <aside class="col-side card"><h2>Ações</h2>
@@ -304,6 +306,104 @@ r.post('/eventos/:id/resultados/revisao/:rid', async (req, res) => {
   await sendMail(u.email, `Resposta à revisão de resultado — ${e.name}`, String(req.body.response || ''), 'results');
   await audit(req, 'results.review_answered', { orgId: req.org.id, entity: 'result_review', entityId: v.id });
   res.redirect(303, `/organizador/eventos/${e.id}/resultados`);
+});
+
+// ---------- Estoque do kit (camisetas e itens) ----------
+const stockCell = (n) => (n == null ? 'Sem controle' : String(n));
+const stockBadge = (row) => (row.level ? badge(...row.level) : row.available == null ? '—' : badge('OK', 'ok'));
+async function loadTarget(e, target) {
+  const [kind, raw0] = String(target || '').split(':'); const id = Number(raw0);
+  const row = kind === 's' ? await db.one('SELECT s.*, k.name kit FROM kit_sizes s JOIN kits k ON k.id=s.kit_id WHERE s.id=? AND k.event_id=?', id, e.id)
+    : kind === 'i' ? await db.one('SELECT i.*, k.name kit FROM kit_items i JOIN kits k ON k.id=i.kit_id WHERE i.id=? AND k.event_id=?', id, e.id) : null;
+  if (!row) throw new UserError('Item de estoque não encontrado neste evento.', 404);
+  return { kind, row, label: kind === 's' ? `Camiseta ${row.size}` : row.name };
+}
+const addMove = (e, req, m) => db.run('INSERT INTO kit_stock_moves(event_id,kit_id,item_id,size,label,kind,delta,new_stock,reason,user_id) VALUES(?,?,?,?,?,?,?,?,?,?)', e.id, m.kit_id, m.item_id ?? null, m.size ?? null, m.label, m.kind, m.delta, m.new_stock, m.reason, req.user.id);
+
+r.get('/eventos/:id/estoque', async (req, res) => {
+  const e = await ev(req, 'kits'); const groups = await kitStock.stockRows(e.id);
+  const moves = await db.all('SELECT m.*, k.name kit, u.name who FROM kit_stock_moves m JOIN kits k ON k.id=m.kit_id LEFT JOIN users u ON u.id=m.user_id WHERE m.event_id=? ORDER BY m.id DESC LIMIT 200', e.id);
+  const targets = groups.flatMap((g) => g.rows.map((x) => [`${x.kind === 'size' ? 's' : 'i'}:${x.id}`, `${g.kit.name} — ${x.label}`]));
+  res.page({ title: 'Estoque do kit', wide: true, body: html`${await tabs(req, e, '/estoque')}
+  ${tip('Camisetas e itens do kit (boné, medalha, número de peito...). Tênis não faz parte do kit. "Disponível para venda" = estoque − reservado/vendido; quando um item que limita vendas chega a zero, o kit fica esgotado na inscrição.')}
+  <p><a class="btn btn-ghost btn-sm" href="/organizador/eventos/${e.id}/estoque.csv">Exportar CSV</a></p>
+  ${groups.length ? groups.map((g) => html`<section class="card"><h2>${g.kit.name} ${g.soldOut ? badge('Kit esgotado', 'danger') : ''}</h2>
+    ${table(['Item', 'Estoque', 'Reservado/vendido', 'Entregue', 'A entregar', 'Disponível para venda', 'Situação', 'Ações'], g.rows.map((x) => [html`${x.label}${x.kind === 'item' && !x.limits ? html` <small class="muted">(não bloqueia vendas)</small>` : ''}`, stockCell(x.stock), String(x.used), String(x.given), String(x.pending), stockCell(x.available), stockBadge(x),
+      x.kind === 'item' ? html`<form method="post" action="/organizador/eventos/${e.id}/estoque/itens/${x.id}/remover" class="inline" data-confirm="Remover ${x.label} do kit? O histórico é mantido.">${csrf(req)}<button class="linklike danger" aria-label="Remover ${x.label}">Remover</button></form>` : '']), { emptyMsg: 'Kit sem camiseta e sem itens cadastrados.' })}</section>`) : empty('Nenhum kit cadastrado. Cadastre kits na etapa 5 do evento.')}
+  ${groups.length ? html`<div class="cols"><section class="card col-main"><h2>Ajustar estoque</h2>
+    <form method="post" action="/organizador/eventos/${e.id}/estoque/ajuste" class="stack">${csrf(req)}
+    ${field('target', 'Item ou tamanho', { required: true, options: [['', 'Selecione'], ...targets], id: 'st-target' })}
+    <div class="row">${field('tipo', 'Tipo', { required: true, options: [['in', 'Entrada (+)'], ['out', 'Saída/perda (−)'], ['set', 'Definir total']], id: 'st-tipo' })}${field('qty', 'Quantidade', { type: 'number', required: true, attrs: 'min="0" step="1"', id: 'st-qty' })}</div>
+    ${field('reason', 'Motivo', { required: true, id: 'st-reason', placeholder: 'Ex.: chegada do fornecedor, peças com defeito' })}<button class="btn">Registrar ajuste</button></form></section>
+    <aside class="card col-side"><h2>Adicionar item a um kit</h2><form method="post" action="/organizador/eventos/${e.id}/estoque/itens" class="stack">${csrf(req)}
+    ${field('kit_id', 'Kit', { required: true, options: groups.map((g) => [g.kit.id, g.kit.name]), id: 'st-kit' })}
+    ${field('name', 'Item', { required: true, id: 'st-name', attrs: 'list="kit-sugestoes"', hint: 'Tênis não faz parte do kit.' })}<datalist id="kit-sugestoes">${kitStock.SUGGESTED_ITEMS.map((n) => html`<option value="${n}">`)}</datalist>
+    ${field('stock', 'Quantidade em estoque (vazio = sem controle)', { type: 'number', attrs: 'min="0" step="1"', id: 'st-stock' })}
+    ${field('limits_sales', 'Ao esgotar, o kit não pode mais ser escolhido', { type: 'checkbox', value: 1, id: 'st-limits', hint: 'Marcado por padrão: com estoque informado, o kit esgota quando o item acabar.' })}<button class="btn btn-ghost">Adicionar item</button></form></aside></div>` : ''}
+  <section class="card"><h2>Histórico de movimentações</h2>${table(['Quando', 'Kit', 'Item', 'Tipo', 'Quantidade', 'Novo estoque', 'Motivo', 'Por'], moves.map((m) => [fmtDateTime(m.created_at, e.timezone), m.kit, m.label || m.size || '—', kitStock.MOVE_KIND[m.kind] || m.kind, m.delta > 0 ? `+${m.delta}` : String(m.delta), stockCell(m.new_stock), m.reason, m.who || '—']), { emptyMsg: 'Nenhuma movimentação registrada.' })}</section>` });
+});
+
+r.post('/eventos/:id/estoque/ajuste', async (req, res) => {
+  const e = await ev(req, 'kits'); const b = req.body;
+  const reason = String(b.reason || '').trim().slice(0, 300); const qty = Number(b.qty);
+  if (!['in', 'out', 'set'].includes(b.tipo)) throw new UserError('Tipo de ajuste inválido.');
+  if (b.qty === '' || b.qty == null || !Number.isSafeInteger(qty) || qty < 0 || (b.tipo !== 'set' && qty === 0)) throw new UserError('Informe uma quantidade válida (número inteiro).');
+  if (qty > kitStock.MAX_STOCK) throw new UserError('Quantidade muito alta.');
+  if (reason.length < 3) throw new UserError('Informe o motivo do ajuste.');
+  const t = await db.tx(async () => {
+    const t0 = await loadTarget(e, b.target); const cur = t0.row.stock ?? 0;
+    const next = b.tipo === 'in' ? cur + qty : b.tipo === 'out' ? cur - qty : qty;
+    if (next < 0) throw new UserError(`O estoque não pode ficar negativo: ${t0.label} tem ${cur} unidade(s).`);
+    await db.run(`UPDATE ${t0.kind === 's' ? 'kit_sizes' : 'kit_items'} SET stock=? WHERE id=?`, next, t0.row.id);
+    await addMove(e, req, { kit_id: t0.row.kit_id, item_id: t0.kind === 'i' ? t0.row.id : null, size: t0.kind === 's' ? t0.row.size : null, label: t0.label, kind: b.tipo, delta: next - cur, new_stock: next, reason });
+    return { ...t0, cur, next };
+  });
+  await audit(req, 'kit.stock_adjusted', { orgId: req.org.id, entity: 'event', entityId: e.id, detail: { kit: t.row.kit, item: t.label, from: t.cur, to: t.next, reason } });
+  res.flash('success', `Estoque de ${t.label} (${t.row.kit}) atualizado para ${t.next}.`);
+  res.redirect(303, `/organizador/eventos/${e.id}/estoque`);
+});
+
+r.post('/eventos/:id/estoque/itens', async (req, res) => {
+  const e = await ev(req, 'kits'); const b = req.body; const name = String(b.name || '').trim().slice(0, 60);
+  if (!name) throw new UserError('Informe o nome do item.');
+  kitStock.assertNotShoe(name);
+  const stock = b.stock === '' || b.stock == null ? null : Number(b.stock);
+  if (stock != null && (!Number.isSafeInteger(stock) || stock < 0)) throw new UserError('Quantidade em estoque inválida.');
+  if (stock != null && stock > kitStock.MAX_STOCK) throw new UserError('Quantidade muito alta.');
+  const kit = await db.tx(async () => {
+    const k = await db.one('SELECT * FROM kits WHERE id=? AND event_id=?', Number(b.kit_id), e.id);
+    if (!k) throw new UserError('Kit não encontrado neste evento.', 404);
+    if ((await db.all('SELECT name FROM kit_items WHERE kit_id=?', k.id)).some((x) => kitStock.norm(x.name) === kitStock.norm(name))) throw new UserError(`O kit ${k.name} já tem o item ${name}.`);
+    const sort = (await db.one('SELECT COALESCE(MAX(sort),-1)+1 n FROM kit_items WHERE kit_id=?', k.id)).n;
+    const id = Number((await db.run('INSERT INTO kit_items(kit_id,name,stock,limits_sales,sort) VALUES(?,?,?,?,?)', k.id, name, stock, b.limits_sales ? 1 : 0, sort)).lastInsertRowid);
+    await addMove(e, req, { kit_id: k.id, item_id: id, label: name, kind: 'add', delta: stock ?? 0, new_stock: stock, reason: 'Item adicionado ao kit' });
+    return k;
+  });
+  await audit(req, 'kit.item_added', { orgId: req.org.id, entity: 'event', entityId: e.id, detail: { kit: kit.name, item: name, stock } });
+  res.flash('success', `${name} adicionado ao kit ${kit.name}.`);
+  res.redirect(303, `/organizador/eventos/${e.id}/estoque`);
+});
+
+r.post('/eventos/:id/estoque/itens/:itemId/remover', async (req, res) => {
+  const e = await ev(req, 'kits');
+  const t = await db.tx(async () => {
+    const t0 = await loadTarget(e, `i:${req.params.itemId}`);
+    await db.run('DELETE FROM kit_items WHERE id=?', t0.row.id); // movimentações antigas ficam com item_id e nome
+    await addMove(e, req, { kit_id: t0.row.kit_id, item_id: t0.row.id, label: t0.label, kind: 'remove', delta: -(t0.row.stock ?? 0), new_stock: null, reason: 'Item removido do kit' });
+    return t0;
+  });
+  await audit(req, 'kit.item_removed', { orgId: req.org.id, entity: 'event', entityId: e.id, detail: { kit: t.row.kit, item: t.label } });
+  res.flash('success', `${t.label} removido do kit ${t.row.kit}. O histórico foi mantido.`);
+  res.redirect(303, `/organizador/eventos/${e.id}/estoque`);
+});
+
+r.get('/eventos/:id/estoque.csv', async (req, res) => {
+  const e = await ev(req, 'kits');
+  const rows = (await kitStock.stockRows(e.id)).flatMap((g) => g.rows.map((x) => ({ ...x, kit: g.kit.name })));
+  await audit(req, 'export.kit_stock', { orgId: req.org.id, entity: 'event', entityId: e.id, detail: { count: rows.length } });
+  res.type('text/csv').attachment(`estoque-kit-${e.slug}.csv`).send(toCsv(rows, [
+    { label: 'Kit', key: 'kit' }, { label: 'Item', key: 'label' }, { label: 'Estoque', value: (x) => x.stock ?? '' }, { label: 'Reservado/vendido', key: 'used' }, { label: 'Entregue', key: 'given' },
+    { label: 'A entregar', key: 'pending' }, { label: 'Disponível para venda', value: (x) => x.available ?? '' }, { label: 'Situação', value: (x) => (x.level ? x.level[0] : x.available == null ? 'Sem controle' : 'OK') }]));
 });
 
 module.exports = r;

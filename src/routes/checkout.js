@@ -6,6 +6,7 @@ const { html, raw, brl, fmtDateTime, fmtDate, json, UserError, NotFound, ageAt }
 const { fmtCpf } = require('../lib/docs');
 const { currentLot, publicStatus, counts, expireStale } = require('../lib/events');
 const { createOrder, questionsFor } = require('../lib/orders');
+const { kitBlockingItem } = require('../lib/kitStock');
 const payments = require('../lib/payments');
 const { requireUser } = require('../lib/guards');
 const { loadPublicEvent } = require('./public');
@@ -20,6 +21,7 @@ async function participantBlock(ev, i, user, v = {}) {
   for (const s of sizeRows) if (await counts.size(s.kit_id, s.size) < s.stock) sizeOk.add(`${s.kit_id}|${s.size}`);
   const mods = await db.all('SELECT * FROM modalities WHERE event_id=? ORDER BY sort,id', ev.id);
   const kits = await db.all('SELECT * FROM kits WHERE event_id=?', ev.id);
+  for (const k of kits) k.soldOut = !!await kitBlockingItem(k.id);
   const allQs = await db.all('SELECT q.*, m.name mn FROM questions q LEFT JOIN modalities m ON m.id=q.modality_id WHERE q.event_id=? AND q.active=1 ORDER BY sort,id', ev.id);
   const self = i === 0 && v.self !== '0';
   const pre = self && !v.name ? { name: user.name, cpf: user.cpf ? fmtCpf(user.cpf) : '', birth_date: user.birth_date, gender: user.gender, email: user.email } : {};
@@ -31,7 +33,7 @@ async function participantBlock(ev, i, user, v = {}) {
   <div class="row">${field(p('birth_date'), 'Data de nascimento', { type: 'date', value: val.birth_date, required: true, id: `p${i}-birth`, attrs: `data-minor-target="p${i}-guardian"` })}${field(p('gender'), 'Sexo (para categoria)', { value: val.gender, options: [['', 'Selecione'], ['F', 'Feminino'], ['M', 'Masculino']], required: true, id: `p${i}-g` })}${field(p('email'), 'E-mail do participante', { type: 'email', value: val.email, id: `p${i}-email` })}</div>
   <div id="p${i}-guardian" class="guardian"><p class="muted">Menor de 18 anos na data da prova: informe o responsável legal, que autoriza a participação.</p><div class="row">${field(p('guardian_name'), 'Nome do responsável', { value: val.guardian_name, id: `p${i}-gn` })}${field(p('guardian_cpf'), 'CPF do responsável', { value: val.guardian_cpf, id: `p${i}-gc` })}</div></div>
   <div class="row">${field(p('modality_id'), 'Modalidade / distância', { value: val.modality_id, required: true, id: `p${i}-mod`, options: [['', 'Selecione'], ...await Promise.all(mods.map(async (m) => { const l = await currentLot(ev.id, m.id); const full = (m.capacity != null && await counts.modality(m.id) >= m.capacity) || !l; return [m.id, `${m.name} — ${full ? 'indisponível' : `${l.name}: ${l.price_cents ? brl(l.price_cents) : 'gratuito'}`}`]; }))] })}
-  ${kits.length ? field(p('kit_id'), 'Kit', { value: val.kit_id, required: true, id: `p${i}-kit`, options: [['', 'Selecione'], ...kits.map((k) => [k.id, `${k.name}${k.extra_price_cents ? ` (+ ${brl(k.extra_price_cents)})` : ''}`])] }) : ''}
+  ${kits.length ? field(p('kit_id'), 'Kit', { value: val.kit_id, required: true, id: `p${i}-kit`, options: [['', 'Selecione'], ...kits.map((k) => [k.id, `${k.name}${k.extra_price_cents ? ` (+ ${brl(k.extra_price_cents)})` : ''}${k.soldOut ? ' (esgotado)' : ''}`])] }) : ''}
   ${kits.some((k) => k.has_shirt) ? field(p('kit_size'), 'Tamanho da camiseta', { value: val.kit_size, id: `p${i}-size`, options: [['', 'Selecione'], ...[...new Set(sizeRows.filter((s) => sizeOk.has(`${s.kit_id}|${s.size}`)).map((s) => s.size))]] }) : ''}</div>
   ${field(p('team_name'), 'Equipe ou assessoria (opcional)', { value: val.team_name, id: `p${i}-team` })}
   ${allQs.length ? html`<div class="questions"><h3>Questionário do organizador</h3>${allQs.map((q) => {
@@ -55,7 +57,7 @@ async function inscricaoForm(req, ev, n, { values = [], extrasV = {}, errors = [
   ${errorsBox(errors)}
   <p>Inscrições neste pedido: ${[1, 2, 3, 4, 5].map((k) => (k === n ? html`<strong>${k}</strong> ` : html`<a href="?n=${k}">${k}</a> `))} ${tip('Inscrições em grupo: adicione vários participantes no mesmo pedido. Cupons de grupo exigem um mínimo de inscrições.')}</p>
   <form method="post" action="/e/${ev.slug}/inscricao?n=${n}" novalidate>${csrf(req)}
-  ${Array.from({ length: n }, async (_, i) => await participantBlock(ev, i, req.user, values[i] || {}))}
+  ${await Promise.all(Array.from({ length: n }, (_, i) => participantBlock(ev, i, req.user, values[i] || {})))}
   ${variants.length ? html`<fieldset class="card"><legend>Produtos extras (opcional)</legend><p class="muted">Itens adicionais com retirada junto ao kit. Não geram nova inscrição.</p>${await Promise.all(variants.map(async (v) => { const left = v.stock - await counts.variant(v.id); return field(`x[v${v.id}]`, `${v.name} — ${v.label} (${brl(v.price_cents)})${left <= 0 ? ' — esgotado' : ''}`, { type: 'number', value: extrasV[`v${v.id}`] || 0, attrs: `min="0" max="${Math.max(0, Math.min(10, left))}" ${left <= 0 ? 'disabled' : ''}`, id: `x-${v.id}` }); }))}</fieldset>` : ''}
   <fieldset class="card"><legend>Finalização</legend>${field('coupon', 'Cupom de desconto (opcional)', { value: coupon })}
   ${field('accept', raw(`Li e aceito o <a href="/e/${ev.slug}#regulamento" target="_blank">regulamento</a> (versão ${ev.regulation_version}) e a política de cancelamento do evento`), { type: 'checkbox', required: true })}

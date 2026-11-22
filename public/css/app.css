@@ -513,3 +513,8 @@ details.integration > form:last-child, details.integration > .test-form:last-chi
 .podium li{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
 .medal{display:inline-grid;place-items:center;min-width:2.2rem;height:2.2rem;border-radius:50%;font-weight:800;font-size:.85rem;background:#e5e7eb;color:#111}
 .medal-1{background:#f5c518}.medal-2{background:#c0c7cf}.medal-3{background:#d9925b}
+
+/* Sugestões de itens do kit (etapa 5) */
+.kit-suggest { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr)); gap: 2px 16px; margin: 8px 0; }
+.kit-suggest legend { grid-column: 1 / -1; font-weight: 600; }
+.kit-suggest .field { margin: 0; }

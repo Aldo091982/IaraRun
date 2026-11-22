@@ -22,6 +22,7 @@ const counts = {
   modality: async (mid, excludeOrder = 0) => (await db.one(`SELECT COUNT(*) n FROM registrations WHERE modality_id=? AND status IN ${ACTIVE_REG} AND order_id<>?`, mid, excludeOrder)).n,
   lot: async (lid, excludeOrder = 0) => (await db.one(`SELECT COUNT(*) n FROM registrations WHERE lot_id=? AND status IN ${ACTIVE_REG} AND order_id<>?`, lid, excludeOrder)).n,
   size: async (kitId, size, excludeOrder = 0) => (await db.one(`SELECT COUNT(*) n FROM registrations WHERE kit_id=? AND kit_size=? AND status IN ${ACTIVE_REG} AND order_id<>?`, kitId, size, excludeOrder)).n,
+  kit: async (kitId, excludeOrder = 0) => (await db.one(`SELECT COUNT(*) n FROM registrations WHERE kit_id=? AND status IN ${ACTIVE_REG} AND order_id<>?`, kitId, excludeOrder)).n,
   variant: async (vid, excludeOrder = 0) => (await db.one("SELECT COALESCE(SUM(qty),0) n FROM order_items WHERE variant_id=? AND status IN ('reserved','paid') AND order_id<>?", vid, excludeOrder)).n,
 };
 

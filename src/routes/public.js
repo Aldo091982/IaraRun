@@ -6,6 +6,7 @@ const { html, raw, brl, fmtDate, fmtDateTime, fmtTime, tzLabel, UF, NotFound, fm
 const { publicStatus, PUBLIC_STATUS, currentLot, counts } = require('../lib/events');
 const { currentPublished, versionRows, totals, placings, RESULT_STATUS } = require('../lib/results');
 const { settings } = require('../lib/core');
+const { kitBlockingItem } = require('../lib/kitStock');
 const { page, csrf, badge, field, empty, APP_NAME } = require('../views/layout');
 const { requireUser } = require('../lib/guards');
 const { art, sportKey } = require('../views/sportArt');
@@ -148,7 +149,7 @@ r.get('/e/:slug', async (req, res) => {
     <section class="card"><h2>Lotes e preços</h2>${lots.length ? html`<div class="table-wrap"><table><thead><tr><th>Lote</th><th>Modalidade</th><th>Preço</th><th>Período</th><th>Situação</th></tr></thead><tbody>
       ${await Promise.all(lots.map(async (l) => { const cur = await someAsync(mods, async (m) => (await currentLot(ev.id, m.id))?.id === l.id); const ended = (l.ends_utc && l.ends_utc <= now) || (l.quantity != null && await counts.lot(l.id) >= l.quantity); return html`<tr><td>${l.name}</td><td>${l.modality_name || 'Todas'}</td><td>${l.price_cents ? brl(l.price_cents) : 'Gratuito'}</td><td>${l.starts_utc ? fmtDateTime(l.starts_utc, ev.timezone) : 'Imediato'} – ${l.ends_utc ? fmtDateTime(l.ends_utc, ev.timezone) : 'até esgotar'}</td><td>${cur ? badge('Vigente', 'ok') : ended ? badge('Encerrado', 'muted') : badge('Futuro', 'info')}</td></tr>`; }))}</tbody></table></div>
       ${ev.fee_percent > 0 && ev.fee_payer === 'athlete' ? html`<p class="muted">Taxa de serviço de ${String(ev.fee_percent).replace('.', ',')}% acrescida no pagamento.</p>` : ''}` : empty('Preços ainda não divulgados.')}</section>
-    ${kits.length ? html`<section class="card"><h2>Kits</h2>${await Promise.all(kits.map(async (k) => html`<h3>${k.name}${k.extra_price_cents ? ` (+ ${brl(k.extra_price_cents)})` : ''}</h3><p>${k.description}</p>${k.has_shirt ? html`<p class="muted">Camiseta: ${(await db.all('SELECT size FROM kit_sizes WHERE kit_id=? ORDER BY id', k.id)).map((s) => s.size).join(', ')}</p>` : ''}`))}
+    ${kits.length ? html`<section class="card"><h2>Kits</h2>${await Promise.all(kits.map(async (k) => html`<h3>${k.name}${k.extra_price_cents ? ` (+ ${brl(k.extra_price_cents)})` : ''}${await kitBlockingItem(k.id) ? ' (esgotado)' : ''}</h3><p>${k.description}</p>${await (async () => { const its = await db.all('SELECT name FROM kit_items WHERE kit_id=? ORDER BY sort, id', k.id); return its.length ? html`<p class="muted">Itens: ${its.map((x) => x.name).join(', ')}</p>` : ''; })()}${k.has_shirt ? html`<p class="muted">Camiseta: ${(await db.all('SELECT size FROM kit_sizes WHERE kit_id=? ORDER BY id', k.id)).map((s) => s.size).join(', ')}</p>` : ''}`))}
       ${products.length ? html`<h3>Produtos extras</h3><p>${products.map((p) => `${p.name} (${brl(p.price_cents)})`).join(' · ')}</p>` : ''}</section>` : ''}
     <section class="card"><h2>Retirada do kit</h2><div class="prose">${raw(paragraphs(ev.kit_pickup_info || 'A divulgar.'))}</div></section>
     <section class="card"><h2>Regulamento</h2><details><summary>Ler regulamento completo (versão ${ev.regulation_version})</summary><div class="prose">${raw(paragraphs(ev.regulation))}</div></details>

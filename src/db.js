@@ -573,6 +573,33 @@ const migrations = [
   `ALTER TABLE message_log ADD COLUMN claimed_at TEXT`,
   `ALTER TABLE message_log ADD COLUMN attempts BIGINT NOT NULL DEFAULT 0`,
 ],
+// 005 estoque dos itens do kit (camiseta continua em kit_sizes) e histórico de movimentações
+[
+  `CREATE TABLE kit_items (
+  id BIGSERIAL PRIMARY KEY,
+  kit_id BIGINT NOT NULL,
+  name TEXT NOT NULL,
+  stock BIGINT,
+  limits_sales BIGINT NOT NULL DEFAULT 1,
+  sort BIGINT NOT NULL DEFAULT 0,
+  UNIQUE(kit_id, name)
+)`,
+  `CREATE TABLE kit_stock_moves (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL,
+  kit_id BIGINT NOT NULL,
+  item_id BIGINT,
+  size TEXT,
+  label TEXT,
+  kind TEXT NOT NULL,
+  delta BIGINT NOT NULL,
+  new_stock BIGINT,
+  reason TEXT NOT NULL,
+  user_id BIGINT,
+  created_at TEXT NOT NULL DEFAULT (${NOW})
+)`,
+  `CREATE INDEX kit_stock_moves_event ON kit_stock_moves(event_id, id)`,
+],
 ];
 
 let pool = null;
