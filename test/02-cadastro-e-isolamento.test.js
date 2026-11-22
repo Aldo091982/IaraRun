@@ -153,3 +153,38 @@ test('duplicar evento como rascunho sem inscrições, transações ou resultados
   assert.equal((await db.one('SELECT COUNT(*) n FROM modalities WHERE event_id=?', copy.id)).n, 2);
   assert.ok((await db.one('SELECT COUNT(*) n FROM lots WHERE event_id=? AND starts_utc IS NULL', copy.id)).n >= 1);
 });
+
+test('administração: dar e remover acesso de administrador pela tela de usuários', async () => {
+  const adm = new h.Client(); await h.login(adm, await h.makeAdmin('chefe@teste.local')); await adm.post('/contexto', { context: 'admin' });
+  const novo = new h.Client(); await h.signup(novo, { name: 'Nova Admin', email: 'nova.admin@teste.local' });
+  const target = await db.one('SELECT * FROM users WHERE email=?', 'nova.admin@teste.local');
+  assert.equal(target.email_verified_at, null);
+  // a tela mostra o botão e a orientação
+  const page = await adm.get('/admin/usuarios?q=nova.admin');
+  assert.match(page.text, /Tornar administrador/);
+  // quem não é administrador não consegue dar acesso
+  const intruso = new h.Client(); await h.signup(intruso, { name: 'Intruso', email: 'intruso.admin@teste.local' });
+  const negado = await intruso.post(`/admin/usuarios/${target.id}`, { acao: 'grant_admin' }, { follow: false });
+  assert.ok([302, 303, 403].includes(negado.status), `status ${negado.status}`);
+  assert.equal((await db.one('SELECT is_admin FROM users WHERE id=?', target.id)).is_admin, 0);
+  // administrador dá o acesso: e-mail confirmado e auditoria registrada
+  await adm.post(`/admin/usuarios/${target.id}`, { acao: 'grant_admin' });
+  const promovida = await db.one('SELECT * FROM users WHERE id=?', target.id);
+  assert.equal(promovida.is_admin, 1);
+  assert.ok(promovida.email_verified_at);
+  assert.ok(await db.one("SELECT 1 FROM audit_log WHERE action='admin.granted' AND entity_id=?", String(target.id)));
+  // a nova administradora entra no perfil de administração
+  await novo.post('/contexto', { context: 'admin' });
+  assert.equal((await novo.get('/admin')).status, 200);
+  // remover: sessões encerradas e acesso negado
+  await adm.post(`/admin/usuarios/${target.id}`, { acao: 'revoke_admin' });
+  assert.equal((await db.one('SELECT is_admin FROM users WHERE id=?', target.id)).is_admin, 0);
+  assert.equal((await db.one('SELECT COUNT(*) n FROM sessions WHERE user_id=?', target.id)).n, 0);
+  const depois = await novo.get('/admin', { follow: false });
+  assert.ok([302, 303, 403].includes(depois.status), `status ${depois.status}`);
+  // ninguém altera o próprio acesso
+  const chefe = await db.one('SELECT id FROM users WHERE email=?', 'chefe@teste.local');
+  const self = await adm.post(`/admin/usuarios/${chefe.id}`, { acao: 'revoke_admin' });
+  assert.match(self.text, /própria conta/);
+  assert.equal((await db.one('SELECT is_admin FROM users WHERE id=?', chefe.id)).is_admin, 1);
+});

@@ -104,11 +104,32 @@ r.get('/usuarios', async (req, res) => {
   const us = await db.all(`SELECT * FROM users ${q ? 'WHERE name ILIKE ? OR email ILIKE ?' : ''} ORDER BY id DESC LIMIT 200`, ...(q ? [`%${q}%`, `%${q}%`] : []));
   res.page({ title: 'Usuários', wide: true, body: html`${nav('/admin/usuarios')}<form class="inline-filters filters">${field('q', 'Nome ou e-mail', { value: q })}<button class="btn">Buscar</button></form>
   ${table(['Nome', 'E-mail', 'Confirmado', 'Perfis', 'Situação', ''], await Promise.all(us.map(async (u) => [u.name + (u.is_demo ? ' (demo)' : ''), u.email, u.email_verified_at ? 'Sim' : 'Não', [u.is_admin ? 'Admin' : '', (await db.one('SELECT COUNT(*) n FROM org_members WHERE user_id=?', u.id)).n ? 'Organizador' : '', 'Atleta'].filter(Boolean).join(', '), u.status,
-    u.id === req.user.id ? '' : html`<form method="post" action="/admin/usuarios/${u.id}" class="inline">${csrf(req)}<button name="acao" value="${u.status === 'active' ? 'suspend' : 'activate'}" class="btn btn-sm btn-ghost">${u.status === 'active' ? 'Suspender' : 'Reativar'}</button></form>`])))}` });
+    u.id === req.user.id ? html`<span class="muted">Você</span>` : html`<div class="row-actions">
+      <form method="post" action="/admin/usuarios/${u.id}" class="inline">${csrf(req)}<button name="acao" value="${u.status === 'active' ? 'suspend' : 'activate'}" class="btn btn-sm btn-ghost">${u.status === 'active' ? 'Suspender' : 'Reativar'}</button></form>
+      ${u.is_demo ? '' : u.is_admin
+    ? html`<form method="post" action="/admin/usuarios/${u.id}" class="inline" data-confirm="Remover o acesso de administração de ${u.name}?">${csrf(req)}<button name="acao" value="revoke_admin" class="btn btn-sm btn-ghost">Remover administrador</button></form>`
+    : html`<form method="post" action="/admin/usuarios/${u.id}" class="inline" data-confirm="Dar acesso total de administração a ${u.name} (${u.email})?">${csrf(req)}<button name="acao" value="grant_admin" class="btn btn-sm" ${u.status === 'active' ? '' : 'disabled'}>Tornar administrador</button></form>`}</div>`])))}
+  <p class="muted">Para cadastrar outro administrador: a pessoa cria a conta em <a href="/cadastro">/cadastro</a>, depois você a procura aqui e clica em <strong>Tornar administrador</strong>. O e-mail dela é marcado como confirmado e a mudança fica registrada na auditoria.</p>` });
 });
 r.post('/usuarios/:id', async (req, res) => {
   const id = Number(req.params.id); if (id === req.user.id) throw new UserError('Não é possível alterar a própria conta.');
+  const target = await db.one('SELECT id, name, email, status, is_admin, is_demo FROM users WHERE id=?', id);
+  if (!target) throw new UserError('Usuário não encontrado.', 404);
+  if (req.body.acao === 'grant_admin' || req.body.acao === 'revoke_admin') {
+    const grant = req.body.acao === 'grant_admin';
+    if (target.is_demo) throw new UserError('Contas de demonstração não podem ser administradoras.');
+    if (grant && target.status !== 'active') throw new UserError('Reative a conta antes de torná-la administradora.');
+    await db.tx(async () => {
+      if (!grant && (await db.one("SELECT COUNT(*) n FROM users WHERE is_admin=1 AND status='active' AND id<>?", id)).n === 0) throw new UserError('A plataforma precisa de pelo menos um administrador ativo.');
+      await db.run('UPDATE users SET is_admin=?, email_verified_at=COALESCE(email_verified_at, ?) WHERE id=?', grant ? 1 : 0, new Date().toISOString(), id);
+      if (!grant) await db.run('DELETE FROM sessions WHERE user_id=?', id); // sai de todas as sessões e entra de novo sem o perfil de administração
+    });
+    await audit(req, grant ? 'admin.granted' : 'admin.revoked', { entity: 'user', entityId: id, detail: { email: target.email } });
+    res.flash('success', grant ? `${target.name} agora é administrador. Ao entrar, basta escolher o perfil "Administração" no menu.` : `${target.name} não é mais administrador.`);
+    return res.redirect(303, '/admin/usuarios');
+  }
   const st = req.body.acao === 'suspend' ? 'suspended' : 'active';
+  if (st === 'suspended' && target.is_admin && (await db.one("SELECT COUNT(*) n FROM users WHERE is_admin=1 AND status='active' AND id<>?", id)).n === 0) throw new UserError('Não é possível suspender o último administrador ativo.');
   await db.run('UPDATE users SET status=? WHERE id=?', st, id);
   if (st === 'suspended') await db.run('DELETE FROM sessions WHERE user_id=?', id);
   await audit(req, `admin.user_${st}`, { entity: 'user', entityId: id });
