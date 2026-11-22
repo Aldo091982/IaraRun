@@ -13,6 +13,8 @@ const config = {
   isProd: env === 'production',
   isTest: env === 'test',
   port: Number(process.env.PORT || 3000),
+  // Interface de rede: 127.0.0.1 quando há proxy ou túnel na frente (padrão: todas)
+  host: process.env.HOST || '0.0.0.0',
   baseUrl: (process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, ''),
   db: {
     // postgres://usuario:senha@host:5432/banco — padrão: PostgreSQL local de desenvolvimento (npm run db:start)
