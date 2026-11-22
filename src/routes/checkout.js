@@ -14,10 +14,13 @@ const { csrf, field, badge, table, tip, errorsBox, empty } = require('../views/l
 const r = express.Router();
 const ORDER_STATUS = { pending: ['Aguardando pagamento', 'warn'], paid: ['Pago e confirmado', 'ok'], free: ['Confirmado (gratuito)', 'ok'], expired: ['Reserva expirada', 'muted'], cancelled: ['Cancelado', 'muted'], refunded: ['Reembolsado', 'muted'], partially_refunded: ['Parcialmente reembolsado', 'info'], exception: ['Em análise (exceção de pagamento)', 'danger'] };
 
-function participantBlock(ev, i, user, v = {}) {
-  const mods = db.all('SELECT * FROM modalities WHERE event_id=? ORDER BY sort,id', ev.id);
-  const kits = db.all('SELECT * FROM kits WHERE event_id=?', ev.id);
-  const allQs = db.all('SELECT q.*, m.name mn FROM questions q LEFT JOIN modalities m ON m.id=q.modality_id WHERE q.event_id=? AND q.active=1 ORDER BY sort,id', ev.id);
+async function participantBlock(ev, i, user, v = {}) {
+  const sizeRows = await db.all('SELECT s.size, s.stock, s.kit_id FROM kit_sizes s JOIN kits k ON k.id=s.kit_id WHERE k.event_id=? ORDER BY s.id', ev.id);
+  const sizeOk = new Set();
+  for (const s of sizeRows) if (await counts.size(s.kit_id, s.size) < s.stock) sizeOk.add(`${s.kit_id}|${s.size}`);
+  const mods = await db.all('SELECT * FROM modalities WHERE event_id=? ORDER BY sort,id', ev.id);
+  const kits = await db.all('SELECT * FROM kits WHERE event_id=?', ev.id);
+  const allQs = await db.all('SELECT q.*, m.name mn FROM questions q LEFT JOIN modalities m ON m.id=q.modality_id WHERE q.event_id=? AND q.active=1 ORDER BY sort,id', ev.id);
   const self = i === 0 && v.self !== '0';
   const pre = self && !v.name ? { name: user.name, cpf: user.cpf ? fmtCpf(user.cpf) : '', birth_date: user.birth_date, gender: user.gender, email: user.email } : {};
   const val = { ...pre, ...v };
@@ -27,9 +30,9 @@ function participantBlock(ev, i, user, v = {}) {
   <div class="row">${field(p('name'), 'Nome completo', { value: val.name, required: true, id: `p${i}-name` })}${field(p('cpf'), 'CPF', { value: val.cpf, required: true, id: `p${i}-cpf`, attrs: 'inputmode="numeric" data-mask="cpf"' })}</div>
   <div class="row">${field(p('birth_date'), 'Data de nascimento', { type: 'date', value: val.birth_date, required: true, id: `p${i}-birth`, attrs: `data-minor-target="p${i}-guardian"` })}${field(p('gender'), 'Sexo (para categoria)', { value: val.gender, options: [['', 'Selecione'], ['F', 'Feminino'], ['M', 'Masculino']], required: true, id: `p${i}-g` })}${field(p('email'), 'E-mail do participante', { type: 'email', value: val.email, id: `p${i}-email` })}</div>
   <div id="p${i}-guardian" class="guardian"><p class="muted">Menor de 18 anos na data da prova: informe o responsável legal, que autoriza a participação.</p><div class="row">${field(p('guardian_name'), 'Nome do responsável', { value: val.guardian_name, id: `p${i}-gn` })}${field(p('guardian_cpf'), 'CPF do responsável', { value: val.guardian_cpf, id: `p${i}-gc` })}</div></div>
-  <div class="row">${field(p('modality_id'), 'Modalidade / distância', { value: val.modality_id, required: true, id: `p${i}-mod`, options: [['', 'Selecione'], ...mods.map((m) => { const l = currentLot(ev.id, m.id); const full = (m.capacity != null && counts.modality(m.id) >= m.capacity) || !l; return [m.id, `${m.name} — ${full ? 'indisponível' : `${l.name}: ${l.price_cents ? brl(l.price_cents) : 'gratuito'}`}`]; })] })}
+  <div class="row">${field(p('modality_id'), 'Modalidade / distância', { value: val.modality_id, required: true, id: `p${i}-mod`, options: [['', 'Selecione'], ...await Promise.all(mods.map(async (m) => { const l = await currentLot(ev.id, m.id); const full = (m.capacity != null && await counts.modality(m.id) >= m.capacity) || !l; return [m.id, `${m.name} — ${full ? 'indisponível' : `${l.name}: ${l.price_cents ? brl(l.price_cents) : 'gratuito'}`}`]; }))] })}
   ${kits.length ? field(p('kit_id'), 'Kit', { value: val.kit_id, required: true, id: `p${i}-kit`, options: [['', 'Selecione'], ...kits.map((k) => [k.id, `${k.name}${k.extra_price_cents ? ` (+ ${brl(k.extra_price_cents)})` : ''}`])] }) : ''}
-  ${kits.some((k) => k.has_shirt) ? field(p('kit_size'), 'Tamanho da camiseta', { value: val.kit_size, id: `p${i}-size`, options: [['', 'Selecione'], ...[...new Set(db.all('SELECT s.size, s.stock, s.kit_id FROM kit_sizes s JOIN kits k ON k.id=s.kit_id WHERE k.event_id=? ORDER BY s.id', ev.id).filter((s) => counts.size(s.kit_id, s.size) < s.stock).map((s) => s.size))]] }) : ''}</div>
+  ${kits.some((k) => k.has_shirt) ? field(p('kit_size'), 'Tamanho da camiseta', { value: val.kit_size, id: `p${i}-size`, options: [['', 'Selecione'], ...[...new Set(sizeRows.filter((s) => sizeOk.has(`${s.kit_id}|${s.size}`)).map((s) => s.size))]] }) : ''}</div>
   ${field(p('team_name'), 'Equipe ou assessoria (opcional)', { value: val.team_name, id: `p${i}-team` })}
   ${allQs.length ? html`<div class="questions"><h3>Questionário do organizador</h3>${allQs.map((q) => {
     const name = `p[${i}][answers][q${q.id}]`; const lbl = `${q.label}${q.mn ? ` (somente ${q.mn})` : ''}`;
@@ -40,55 +43,55 @@ function participantBlock(ev, i, user, v = {}) {
   })}</div>` : ''}</fieldset>`;
 }
 
-r.get('/e/:slug/inscricao', requireUser, (req, res) => {
-  const ev = loadPublicEvent(req);
-  if (publicStatus(ev) !== 'open') { res.flash('error', 'As inscrições deste evento não estão abertas.'); return res.redirect(303, `/e/${ev.slug}`); }
+r.get('/e/:slug/inscricao', requireUser, async (req, res) => {
+  const ev = await loadPublicEvent(req);
+  if (await publicStatus(ev) !== 'open') { res.flash('error', 'As inscrições deste evento não estão abertas.'); return res.redirect(303, `/e/${ev.slug}`); }
   const n = Math.max(1, Math.min(10, Number(req.query.n) || 1));
-  res.page({ title: `Inscrição — ${ev.name}`, body: inscricaoForm(req, ev, n) });
+  res.page({ title: `Inscrição — ${ev.name}`, body: await inscricaoForm(req, ev, n) });
 });
-function inscricaoForm(req, ev, n, { values = [], extrasV = {}, errors = [], coupon = '' } = {}) {
-  const variants = db.all('SELECT v.*, p.name, p.price_cents FROM product_variants v JOIN products p ON p.id=v.product_id WHERE p.event_id=? AND p.active=1', ev.id);
+async function inscricaoForm(req, ev, n, { values = [], extrasV = {}, errors = [], coupon = '' } = {}) {
+  const variants = await db.all('SELECT v.*, p.name, p.price_cents FROM product_variants v JOIN products p ON p.id=v.product_id WHERE p.event_id=? AND p.active=1', ev.id);
   return html`<section><p><a href="/e/${ev.slug}">← ${ev.name}</a></p><h1>Inscrição</h1><p>${fmtDate(ev.start_utc, ev.timezone)} · ${ev.city}/${ev.state}</p>
   ${errorsBox(errors)}
   <p>Inscrições neste pedido: ${[1, 2, 3, 4, 5].map((k) => (k === n ? html`<strong>${k}</strong> ` : html`<a href="?n=${k}">${k}</a> `))} ${tip('Inscrições em grupo: adicione vários participantes no mesmo pedido. Cupons de grupo exigem um mínimo de inscrições.')}</p>
   <form method="post" action="/e/${ev.slug}/inscricao?n=${n}" novalidate>${csrf(req)}
-  ${Array.from({ length: n }, (_, i) => participantBlock(ev, i, req.user, values[i] || {}))}
-  ${variants.length ? html`<fieldset class="card"><legend>Produtos extras (opcional)</legend><p class="muted">Itens adicionais com retirada junto ao kit. Não geram nova inscrição.</p>${variants.map((v) => { const left = v.stock - counts.variant(v.id); return field(`x[v${v.id}]`, `${v.name} — ${v.label} (${brl(v.price_cents)})${left <= 0 ? ' — esgotado' : ''}`, { type: 'number', value: extrasV[`v${v.id}`] || 0, attrs: `min="0" max="${Math.max(0, Math.min(10, left))}" ${left <= 0 ? 'disabled' : ''}`, id: `x-${v.id}` }); })}</fieldset>` : ''}
+  ${Array.from({ length: n }, async (_, i) => await participantBlock(ev, i, req.user, values[i] || {}))}
+  ${variants.length ? html`<fieldset class="card"><legend>Produtos extras (opcional)</legend><p class="muted">Itens adicionais com retirada junto ao kit. Não geram nova inscrição.</p>${await Promise.all(variants.map(async (v) => { const left = v.stock - await counts.variant(v.id); return field(`x[v${v.id}]`, `${v.name} — ${v.label} (${brl(v.price_cents)})${left <= 0 ? ' — esgotado' : ''}`, { type: 'number', value: extrasV[`v${v.id}`] || 0, attrs: `min="0" max="${Math.max(0, Math.min(10, left))}" ${left <= 0 ? 'disabled' : ''}`, id: `x-${v.id}` }); }))}</fieldset>` : ''}
   <fieldset class="card"><legend>Finalização</legend>${field('coupon', 'Cupom de desconto (opcional)', { value: coupon })}
   ${field('accept', raw(`Li e aceito o <a href="/e/${ev.slug}#regulamento" target="_blank">regulamento</a> (versão ${ev.regulation_version}) e a política de cancelamento do evento`), { type: 'checkbox', required: true })}
   <p class="muted">Ao continuar, sua vaga e estoque ficam reservados por ${ev.reservation_minutes} minutos enquanto você paga. A inscrição só é confirmada após validação do pagamento.</p>
   <button class="btn btn-lg btn-block">Revisar e reservar</button></fieldset></form></section>`;
 }
-r.post('/e/:slug/inscricao', requireUser, (req, res) => {
-  const ev = loadPublicEvent(req);
+r.post('/e/:slug/inscricao', requireUser, async (req, res) => {
+  const ev = await loadPublicEvent(req);
   const n = Math.max(1, Math.min(10, Number(req.query.n) || 1));
   const raw0 = Array.isArray(req.body.p) ? req.body.p : Object.values(req.body.p || {});
   const parts = raw0.slice(0, n).map((p, i) => ({ ...p, self: i === 0, modality_id: Number(p.modality_id) || null, kit_id: Number(p.kit_id) || null, answers: p.answers || {} }));
   const extras = Object.entries(req.body.x || {}).map(([variant_id, qty]) => ({ variant_id: Number(String(variant_id).replace(/^v/, '')), qty: Number(qty) })).filter((x) => x.qty > 0);
   try {
-    const order = createOrder({ user: req.user, eventId: ev.id, participants: parts, extras, couponCode: req.body.coupon, acceptRegulation: !!req.body.accept, req });
+    const order = await createOrder({ user: req.user, eventId: ev.id, participants: parts, extras, couponCode: req.body.coupon, acceptRegulation: !!req.body.accept, req });
     // atualiza perfil do atleta com dados informados para o participante 1 (se ausentes)
     const p0 = parts[0];
-    db.run('UPDATE users SET cpf=COALESCE(cpf,?), birth_date=COALESCE(birth_date,?), gender=COALESCE(gender,?) WHERE id=?', String(p0.cpf || '').replace(/\D/g, '') || null, p0.birth_date || null, p0.gender || null, req.user.id);
+    await db.run('UPDATE users SET cpf=COALESCE(cpf,?), birth_date=COALESCE(birth_date,?), gender=COALESCE(gender,?) WHERE id=?', String(p0.cpf || '').replace(/\D/g, '') || null, p0.birth_date || null, p0.gender || null, req.user.id);
     res.redirect(303, `/pedido/${order.code}`);
   } catch (e) {
     if (!e.expose) throw e;
-    res.status(e.status || 400).page({ title: `Inscrição — ${ev.name}`, body: inscricaoForm(req, ev, n, { values: parts, extrasV: req.body.x || {}, errors: e.fields || [e.message], coupon: req.body.coupon }) });
+    res.status(e.status || 400).page({ title: `Inscrição — ${ev.name}`, body: await inscricaoForm(req, ev, n, { values: parts, extrasV: req.body.x || {}, errors: e.fields || [e.message], coupon: req.body.coupon }) });
   }
 });
 
-function loadOrder(req) {
-  const o = db.one('SELECT * FROM orders WHERE code=?', req.params.code);
+async function loadOrder(req) {
+  const o = await db.one('SELECT * FROM orders WHERE code=?', req.params.code);
   if (!o || o.user_id !== req.user.id) throw new NotFound('Pedido não encontrado.');
   return o;
 }
-r.get('/pedido/:code', requireUser, (req, res) => {
-  db.tx(() => expireStale());
-  const o = loadOrder(req);
-  const ev = db.one('SELECT * FROM events WHERE id=?', o.event_id);
-  const regs = db.all('SELECT g.*, m.name modality, c.name category, k.name kit, l.name lot FROM registrations g JOIN modalities m ON m.id=g.modality_id LEFT JOIN categories c ON c.id=g.category_id LEFT JOIN kits k ON k.id=g.kit_id LEFT JOIN lots l ON l.id=g.lot_id WHERE order_id=?', o.id);
-  const items = db.all('SELECT i.*, v.label, p.name FROM order_items i JOIN product_variants v ON v.id=i.variant_id JOIN products p ON p.id=v.product_id WHERE i.order_id=?', o.id);
-  const pays = db.all('SELECT * FROM payments WHERE order_id=? ORDER BY id DESC', o.id);
+r.get('/pedido/:code', requireUser, async (req, res) => {
+  await db.tx(async () => await expireStale());
+  const o = await loadOrder(req);
+  const ev = await db.one('SELECT * FROM events WHERE id=?', o.event_id);
+  const regs = await db.all('SELECT g.*, m.name modality, c.name category, k.name kit, l.name lot FROM registrations g JOIN modalities m ON m.id=g.modality_id LEFT JOIN categories c ON c.id=g.category_id LEFT JOIN kits k ON k.id=g.kit_id LEFT JOIN lots l ON l.id=g.lot_id WHERE order_id=?', o.id);
+  const items = await db.all('SELECT i.*, v.label, p.name FROM order_items i JOIN product_variants v ON v.id=i.variant_id JOIN products p ON p.id=v.product_id WHERE i.order_id=?', o.id);
+  const pays = await db.all('SELECT * FROM payments WHERE order_id=? ORDER BY id DESC', o.id);
   const st = ORDER_STATUS[o.status];
   res.page({ title: `Pedido ${o.code}`, body: html`<section class="card"><p><a href="/minha-conta">← Minhas inscrições</a></p><h1>Pedido ${o.code}</h1><p>${ev.name} · ${fmtDate(ev.start_utc, ev.timezone)}</p>
   <p>${badge(st[0], st[1])} ${o.kind === 'change' ? badge('Alteração de inscrição', 'info') : ''}</p>
@@ -116,8 +119,8 @@ function payBox(req, o) {
     <p class="muted">Você será levado ao ambiente seguro do meio escolhido. A inscrição é confirmada assim que o pagamento for aprovado.</p></form>`;
 }
 r.post('/pedido/:code/pagar', requireUser, async (req, res) => {
-  db.tx(() => expireStale());
-  const o = loadOrder(req);
+  await db.tx(async () => await expireStale());
+  const o = await loadOrder(req);
   if (o.status !== 'pending') throw new UserError('Este pedido não está aguardando pagamento.');
   const url = await payments.startCheckout(o, req.body.meio ? String(req.body.meio) : undefined);
   res.redirect(303, url);
@@ -126,7 +129,7 @@ r.post('/pedido/:code/pagar', requireUser, async (req, res) => {
 // Retorno do PayPal após a aprovação: captura a ordem e aplica o estado lido no PayPal.
 r.get('/pagamento/paypal/retorno', async (req, res) => {
   const token = String(req.query.token || '');
-  const o = token && db.one("SELECT * FROM orders WHERE provider='paypal' AND provider_ref=?", token);
+  const o = token && await db.one("SELECT * FROM orders WHERE provider='paypal' AND provider_ref=?", token);
   if (!o) throw new UserError('Pagamento do PayPal não encontrado.', 404);
   try {
     const captureId = await payments.providers.paypal.capture(token);
@@ -139,11 +142,11 @@ r.get('/pagamento/paypal/retorno', async (req, res) => {
 });
 
 // QR Code do kit: o conteúdo é um token aleatório, sem dados pessoais.
-r.get('/k/:token', (req, res) => {
-  const g = db.one('SELECT id, event_id FROM registrations WHERE qr_token=?', req.params.token);
+r.get('/k/:token', async (req, res) => {
+  const g = await db.one('SELECT id, event_id FROM registrations WHERE qr_token=?', req.params.token);
   if (req.user && g) {
-    const ev = db.one('SELECT org_id FROM events WHERE id=?', g.event_id);
-    const m = require('../lib/orgs').membership(req.user.id, ev.org_id);
+    const ev = await db.one('SELECT org_id FROM events WHERE id=?', g.event_id);
+    const m = await require('../lib/orgs').membership(req.user.id, ev.org_id);
     if (m && require('../lib/orgs').can(m, 'kits', g.event_id)) return res.redirect(303, `/contexto/org:${ev.org_id}?volta=${encodeURIComponent(`/organizador/eventos/${g.event_id}/checkin?q=${req.params.token}`)}`);
   }
   res.page({ title: 'Código de retirada', body: html`<section class="card narrow"><h1>Código de retirada de kit</h1><p>Apresente este QR Code ao operador no ponto de retirada. A conferência é feita pela equipe autorizada do evento.</p></section>` });

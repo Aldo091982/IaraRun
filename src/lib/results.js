@@ -10,14 +10,14 @@ const TEMPLATE_CSV = '﻿' + TEMPLATE_HEADERS.join(';') + '\r\n1;Nome do Atleta;
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toUpperCase().replace(/\s+/g, '_');
 
 /** Lê CSV e devolve prévia com erros por linha. Nada é salvo aqui. */
-function preview(eventId, text) {
+async function preview(eventId, text) {
   const rows = parseCsv(text);
   if (!rows.length) return { rows: [], errors: ['Arquivo vazio.'], valid: 0 };
   const header = rows[0].map((h) => norm(h).toLowerCase());
   const missing = ['numero_peito', 'tempo_bruto', 'tempo_liquido', 'situacao'].filter((h) => !header.includes(h));
   if (missing.length) return { rows: [], errors: [`Colunas obrigatórias ausentes: ${missing.join(', ')}. Use o modelo de importação.`], valid: 0 };
   const col = (r, name) => (r[header.indexOf(name)] ?? '').trim();
-  const regs = new Map(db.all("SELECT g.*, m.name modality_name, m.distance_km FROM registrations g JOIN modalities m ON m.id=g.modality_id WHERE g.event_id=? AND g.status='confirmed' AND g.bib IS NOT NULL", eventId).map((g) => [g.bib, g]));
+  const regs = new Map((await db.all("SELECT g.*, m.name modality_name, m.distance_km FROM registrations g JOIN modalities m ON m.id=g.modality_id WHERE g.event_id=? AND g.status='confirmed' AND g.bib IS NOT NULL", eventId)).map((g) => [g.bib, g]));
   const seen = new Set();
   const out = rows.slice(1).map((r, i) => {
     const line = i + 2; const errors = [];
@@ -59,35 +59,35 @@ function rank(rows, basis = 'net') {
   return rows;
 }
 
-function saveVersion(eventId, rows, userId, note) {
-  return db.tx(() => {
-    const ev = db.one('SELECT ranking_basis FROM events WHERE id=?', eventId);
-    const v = (db.one('SELECT MAX(version) v FROM result_versions WHERE event_id=?', eventId).v || 0) + 1;
-    const vid = Number(db.run("INSERT INTO result_versions(event_id,version,status,note,created_by) VALUES(?,?,'draft',?,?)", eventId, v, note || null, userId).lastInsertRowid);
+async function saveVersion(eventId, rows, userId, note) {
+  return await db.tx(async () => {
+    const ev = await db.one('SELECT ranking_basis FROM events WHERE id=?', eventId);
+    const v = ((await db.one('SELECT MAX(version) v FROM result_versions WHERE event_id=?', eventId)).v || 0) + 1;
+    const vid = Number((await db.run("INSERT INTO result_versions(event_id,version,status,note,created_by) VALUES(?,?,'draft',?,?)", eventId, v, note || null, userId)).lastInsertRowid);
     for (const r of rank(rows.map((x) => ({ ...x })), ev.ranking_basis)) {
-      db.run('INSERT INTO results(version_id,event_id,registration_id,bib,name,modality_id,category_id,gender,gun_s,net_s,status,pace_s_km,rank_overall,rank_gender,rank_category) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      await db.run('INSERT INTO results(version_id,event_id,registration_id,bib,name,modality_id,category_id,gender,gun_s,net_s,status,pace_s_km,rank_overall,rank_gender,rank_category) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         vid, eventId, r.registration_id, r.bib, r.name, r.modality_id, r.category_id, r.gender, r.gun_s, r.net_s, r.status, r.pace_s_km, r.rank_overall, r.rank_gender, r.rank_category);
     }
     return vid;
   });
 }
-function versionRows(versionId) {
-  return db.all('SELECT r.*, m.distance_km, m.name modality_name, c.name category_name FROM results r LEFT JOIN modalities m ON m.id=r.modality_id LEFT JOIN categories c ON c.id=r.category_id WHERE version_id=? ORDER BY r.modality_id, (r.rank_overall IS NULL), r.rank_overall, r.bib', versionId);
+async function versionRows(versionId) {
+  return await db.all('SELECT r.*, m.distance_km, m.name modality_name, c.name category_name FROM results r LEFT JOIN modalities m ON m.id=r.modality_id LEFT JOIN categories c ON c.id=r.category_id WHERE version_id=? ORDER BY r.modality_id, (r.rank_overall IS NULL), r.rank_overall, r.bib', versionId);
 }
 /** Correção: gera nova versão a partir de outra com a linha alterada (histórico preservado). */
-function correct(versionId, bib, patch, userId, note) {
-  const base = db.one('SELECT * FROM result_versions WHERE id=?', versionId);
-  const rows = versionRows(versionId).map((r) => (r.bib === bib ? { ...r, ...patch } : r));
-  return saveVersion(base.event_id, rows, userId, note || `Correção do nº ${bib} sobre a versão ${base.version}`);
+async function correct(versionId, bib, patch, userId, note) {
+  const base = await db.one('SELECT * FROM result_versions WHERE id=?', versionId);
+  const rows = (await versionRows(versionId)).map((r) => (r.bib === bib ? { ...r, ...patch } : r));
+  return await saveVersion(base.event_id, rows, userId, note || `Correção do nº ${bib} sobre a versão ${base.version}`);
 }
-function publish(versionId, status) {
-  return db.tx(() => {
-    const v = db.one('SELECT * FROM result_versions WHERE id=?', versionId);
-    db.run("UPDATE result_versions SET status='superseded' WHERE event_id=? AND status IN ('preliminary','official') AND id<>?", v.event_id, v.id);
-    db.run('UPDATE result_versions SET status=?, published_at=? WHERE id=?', status, nowIso(), v.id);
+async function publish(versionId, status) {
+  return await db.tx(async () => {
+    const v = await db.one('SELECT * FROM result_versions WHERE id=?', versionId);
+    await db.run("UPDATE result_versions SET status='superseded' WHERE event_id=? AND status IN ('preliminary','official') AND id<>?", v.event_id, v.id);
+    await db.run('UPDATE result_versions SET status=?, published_at=? WHERE id=?', status, nowIso(), v.id);
     return v;
   });
 }
-function currentPublished(eventId) { return db.one("SELECT * FROM result_versions WHERE event_id=? AND status IN ('preliminary','official') ORDER BY version DESC LIMIT 1", eventId); }
+async function currentPublished(eventId) { return await db.one("SELECT * FROM result_versions WHERE event_id=? AND status IN ('preliminary','official') ORDER BY version DESC LIMIT 1", eventId); }
 
 module.exports = { preview, rank, saveVersion, versionRows, correct, publish, currentPublished, RESULT_STATUS, TEMPLATE_CSV };

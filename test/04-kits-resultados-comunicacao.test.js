@@ -19,7 +19,7 @@ before(async () => {
   regs = [];
   for (const [g, birth] of [['F', '1990-01-01'], ['M', '1985-01-01'], ['F', '1975-01-01'], ['M', '2000-01-01']]) {
     const a = await f.athlete(); const { order } = await f.register(a, ev, { gender: g, birth_date: birth });
-    regs.push({ a, reg: db.one('SELECT * FROM registrations WHERE order_id=?', order.id) });
+    regs.push({ a, reg: await db.one('SELECT * FROM registrations WHERE order_id=?', order.id) });
   }
 });
 
@@ -31,11 +31,11 @@ test('check-in: busca por QR, número, nome e CPF; mascaramento; duplicidade ent
   assert.ok((await o.c.get(`/organizador/eventos/${ev.id}/checkin?q=${reg.bib}`)).text.includes(reg.name));
   assert.ok((await o.c.get(`/organizador/eventos/${ev.id}/checkin?q=${reg.cpf.slice(3, 9)}`)).text.includes(reg.name));
   await o.c.post(`/organizador/eventos/${ev.id}/itens/point`, { name: 'Balcão 2' });
-  const [p1, p2] = db.all('SELECT id FROM pickup_points WHERE event_id=?', ev.id);
+  const [p1, p2] = await db.all('SELECT id FROM pickup_points WHERE event_id=?', ev.id);
   const [x1, x2] = await Promise.all([p1, p2].map((p) => o.c.post(`/organizador/eventos/${ev.id}/checkin/${reg.id}/kit`, { ponto: p.id, third_name: 'Amiga', third_doc: '123' })));
-  assert.equal(db.one('SELECT COUNT(*) n FROM kit_pickups WHERE registration_id=?', reg.id).n, 1);
+  assert.equal((await db.one('SELECT COUNT(*) n FROM kit_pickups WHERE registration_id=?', reg.id)).n, 1);
   assert.ok([x1, x2].some((x) => /JÁ ENTREGUE/.test(x.text)));
-  assert.equal(db.one('SELECT third_party_name FROM kit_pickups WHERE registration_id=?', reg.id).third_party_name, 'Amiga');
+  assert.equal((await db.one('SELECT third_party_name FROM kit_pickups WHERE registration_id=?', reg.id)).third_party_name, 'Amiga');
   // check-in de presença é diferente da entrega do kit e também não duplica
   await o.c.post(`/organizador/eventos/${ev.id}/checkin/${reg.id}/presenca`, {});
   const dup = await o.c.post(`/organizador/eventos/${ev.id}/checkin/${reg.id}/presenca`, {});
@@ -48,18 +48,18 @@ test('check-in: busca por QR, número, nome e CPF; mascaramento; duplicidade ent
 
 test('importação inválida gera relatório de erros e nada é salvo', async () => {
   const csv = 'numero_peito;nome;modalidade;tempo_bruto;tempo_liquido;situacao\n9999;X;5 km;00:20:00;00:20:00;CONCLUIU\n' + `${regs[1].reg.bib};Y;5 km;abc;00:20:00;CONCLUIU\n${regs[2].reg.bib};Z;5 km;00:20:00;00:21:00;CONCLUIU\n${regs[3].reg.bib};W;5 km;;;VOOU\n`;
-  const pv = results.preview(ev.id, csv);
+  const pv = await results.preview(ev.id, csv);
   const errs = pv.rows.map((r) => r.errors.join('|'));
   assert.match(errs[0], /não corresponde/);
   assert.match(errs[1], /Tempo bruto inválido/);
   assert.match(errs[2], /líquido maior/);
   assert.match(errs[3], /Situação inválida/);
   assert.equal(pv.valid, 0);
-  const before = db.one('SELECT COUNT(*) n FROM result_versions WHERE event_id=?', ev.id).n;
+  const before = (await db.one('SELECT COUNT(*) n FROM result_versions WHERE event_id=?', ev.id)).n;
   const r = await o.c.post(`/organizador/eventos/${ev.id}/resultados/salvar`, { csv });
   assert.match(r.text, /Nenhuma linha válida|linhas com erro/);
-  assert.equal(db.one('SELECT COUNT(*) n FROM result_versions WHERE event_id=?', ev.id).n, before);
-  assert.match(results.preview(ev.id, 'a;b\n1;2').errors[0], /Colunas obrigatórias/);
+  assert.equal((await db.one('SELECT COUNT(*) n FROM result_versions WHERE event_id=?', ev.id)).n, before);
+  assert.match((await results.preview(ev.id, 'a;b\n1;2')).errors[0], /Colunas obrigatórias/);
 });
 
 test('classificação geral, por sexo e categoria; desempate; DNS/DNF/DSQ; correção versionada; revisão', async () => {
@@ -67,8 +67,8 @@ test('classificação geral, por sexo e categoria; desempate; DNS/DNF/DSQ; corre
   const csv = ['numero_peito;nome;modalidade;tempo_bruto;tempo_liquido;situacao',
     `${A.bib};A;5 km;00:22:10;00:22:00;CONCLUIU`, `${B.bib};B;5 km;00:22:05;00:22:00;CONCLUIU`, `${C.bib};C;5 km;00:30:00;00:29:00;CONCLUIU`, `${D.bib};D;5 km;;;NAO_LARGOU`].join('\n');
   await o.c.post(`/organizador/eventos/${ev.id}/resultados/salvar`, { csv, note: 'v1' });
-  const v1 = db.one('SELECT * FROM result_versions WHERE event_id=? ORDER BY version DESC', ev.id);
-  const rows = Object.fromEntries(results.versionRows(v1.id).map((r) => [r.bib, r]));
+  const v1 = await db.one('SELECT * FROM result_versions WHERE event_id=? ORDER BY version DESC', ev.id);
+  const rows = Object.fromEntries((await results.versionRows(v1.id)).map((r) => [r.bib, r]));
   assert.equal(rows[B.bib].rank_overall, 1, 'empate no líquido desempata pelo bruto');
   assert.equal(rows[A.bib].rank_overall, 2);
   assert.equal(rows[C.bib].rank_overall, 3);
@@ -82,20 +82,20 @@ test('classificação geral, por sexo e categoria; desempate; DNS/DNF/DSQ; corre
   // atleta pede revisão; organizador corrige gerando nova versão e responde
   const { a } = regs[2];
   await a.c.post(`/minha-conta/inscricao/${C.id}/servicos/revisao`, { message: 'Meu tempo líquido foi 00:21:00' });
-  const rv = db.one('SELECT * FROM result_reviews WHERE registration_id=?', C.id);
+  const rv = await db.one('SELECT * FROM result_reviews WHERE registration_id=?', C.id);
   assert.equal(rv.status, 'open');
   await o.c.post(`/organizador/eventos/${ev.id}/resultados/${v1.id}/corrigir`, { bib: C.bib, gun: '00:21:30', net: '00:21:00', status: 'finished', note: 'Revisão do atleta' });
-  const v2 = db.one('SELECT * FROM result_versions WHERE event_id=? ORDER BY version DESC', ev.id);
+  const v2 = await db.one('SELECT * FROM result_versions WHERE event_id=? ORDER BY version DESC', ev.id);
   assert.equal(v2.version, v1.version + 1);
-  assert.equal(results.versionRows(v2.id).find((r) => r.bib === C.bib).rank_overall, 1);
-  assert.equal(results.versionRows(v1.id).find((r) => r.bib === C.bib).rank_overall, 3, 'versão anterior preservada');
+  assert.equal((await results.versionRows(v2.id)).find((r) => r.bib === C.bib).rank_overall, 1);
+  assert.equal((await results.versionRows(v1.id)).find((r) => r.bib === C.bib).rank_overall, 3, 'versão anterior preservada');
   await o.c.post(`/organizador/eventos/${ev.id}/resultados/${v2.id}/publicar`, { status: 'official' });
-  assert.equal(db.one('SELECT status FROM result_versions WHERE id=?', v1.id).status, 'superseded');
+  assert.equal((await db.one('SELECT status FROM result_versions WHERE id=?', v1.id)).status, 'superseded');
   await o.c.post(`/organizador/eventos/${ev.id}/resultados/revisao/${rv.id}`, { response: 'Corrigido na versão 2.' });
-  assert.equal(db.one('SELECT status FROM result_reviews WHERE id=?', rv.id).status, 'answered');
+  assert.equal((await db.one('SELECT status FROM result_reviews WHERE id=?', rv.id)).status, 'answered');
   // privacidade: atleta que oculta resultados não aparece pelo nome
-  db.run('UPDATE users SET public_results=0 WHERE id=?', regs[0].a.user.id);
-  db.run('UPDATE registrations SET user_id=? WHERE id=?', regs[0].a.user.id, A.id);
+  await db.run('UPDATE users SET public_results=0 WHERE id=?', regs[0].a.user.id);
+  await db.run('UPDATE registrations SET user_id=? WHERE id=?', regs[0].a.user.id, A.id);
   const pub = await new h.Client().get(`/e/${ev.slug}/resultados`);
   assert.match(pub.text, /perfil privado/);
 });
@@ -111,21 +111,21 @@ test('histórico separa registro pessoal de resultado oficial', async () => {
 test('comunicação respeita preferências e descadastramento de marketing', async () => {
   const { a } = regs[1];
   await a.c.post('/minha-conta/preferencias', { n_payments: 1, public_results: 1 }); // desmarca event_updates e marketing
-  const before = db.one('SELECT COUNT(*) n FROM outbox WHERE to_email=?', a.email).n;
+  const before = (await db.one('SELECT COUNT(*) n FROM outbox WHERE to_email=?', a.email)).n;
   await o.c.post(`/organizador/eventos/${ev.id}/comunicacao`, { subject: 'Mudança de horário', body: 'A largada mudou para 7h.' });
-  assert.equal(db.one('SELECT COUNT(*) n FROM outbox WHERE to_email=?', a.email).n, before, 'não recebe aviso desativado');
-  assert.ok(db.one("SELECT 1 FROM outbox WHERE to_email=? AND subject LIKE '%Mudança de horário%'", regs[3].a.email));
-  assert.equal(sendMail(a.email, 'Promo', 'x', 'marketing'), false, 'campanha não enviada sem consentimento');
+  assert.equal((await db.one('SELECT COUNT(*) n FROM outbox WHERE to_email=?', a.email)).n, before, 'não recebe aviso desativado');
+  assert.ok(await db.one("SELECT 1 FROM outbox WHERE to_email=? AND subject ILIKE '%Mudança de horário%'", regs[3].a.email));
+  assert.equal(await sendMail(a.email, 'Promo', 'x', 'marketing'), false, 'campanha não enviada sem consentimento');
 });
 
 test('assistente de conteúdo não inventa e mantém texto em rascunho até aprovação', async () => {
   const s = await suggestFromRegulation('A largada será às 7h. O percurso é plano e passa pela orla.\n\nA retirada do kit ocorre no sábado.');
   assert.ok(s.missing.includes('premiação'));
   assert.match(s.route_info, /percurso/);
-  const before = db.one('SELECT description FROM events WHERE id=?', ev.id).description;
+  const before = (await db.one('SELECT description FROM events WHERE id=?', ev.id)).description;
   const page = await o.c.post(`/organizador/eventos/${ev.id}/assistente`, {});
   assert.match(page.text, /Aprovar e aplicar/);
-  assert.equal(db.one('SELECT description FROM events WHERE id=?', ev.id).description, before, 'nada muda antes da aprovação');
+  assert.equal((await db.one('SELECT description FROM events WHERE id=?', ev.id)).description, before, 'nada muda antes da aprovação');
   await o.c.post(`/organizador/eventos/${ev.id}/assistente/aplicar`, { description: 'Texto aprovado pelo organizador com conteúdo do regulamento.' });
-  assert.equal(db.one('SELECT description FROM events WHERE id=?', ev.id).description, 'Texto aprovado pelo organizador com conteúdo do regulamento.');
+  assert.equal((await db.one('SELECT description FROM events WHERE id=?', ev.id)).description, 'Texto aprovado pelo organizador com conteúdo do regulamento.');
 });

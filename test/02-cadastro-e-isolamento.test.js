@@ -3,6 +3,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const h = require('./helpers');
 const f = require('./fixtures');
+const { everyAsync } = require('../src/lib/util');
 const { db } = h;
 const cnpjProvider = require('../src/lib/cnpjProvider');
 const config = require('../src/config');
@@ -28,11 +29,11 @@ test('retomada do cadastro e preservação de dados entre etapas', async () => {
   const skip = await c2.get('/organizador/cadastro?etapa=4');
   assert.doesNotMatch(skip.text, /Etapa 4 de 4/);
   // Conclusão com pendências é recusada com lista do que falta
-  db.run('UPDATE onboarding_drafts SET step=4 WHERE user_id=(SELECT id FROM users WHERE email=?)', email);
+  await db.run('UPDATE onboarding_drafts SET step=4 WHERE user_id=(SELECT id FROM users WHERE email=?)', email);
   const done = await c2.post('/organizador/cadastro/4', { acao: 'concluir' });
   assert.match(done.text, /Documento oficial do responsável/);
   assert.match(done.text, /E-mail e telefone de atendimento/);
-  assert.equal(db.one('SELECT status FROM organizations WHERE cnpj=?', cnpj).status, 'onboarding');
+  assert.equal((await db.one('SELECT status FROM organizations WHERE cnpj=?', cnpj)).status, 'onboarding');
 });
 
 test('CNPJ inválido, já cadastrado (sem assumir empresa) e solicitação de acesso', async () => {
@@ -43,10 +44,10 @@ test('CNPJ inválido, já cadastrado (sem assumir empresa) e solicitação de ac
   assert.match(bad.text, /CNPJ inválido/);
   const dup = await c.postMultipart('/organizador/cadastro/2', { acao: 'avancar', cnpj: o.org.cnpj, legal_name: 'X', trade_name: 'X', city: 'X', state: 'SP', link_role: 'socio' });
   assert.match(dup.text, /já está cadastrada/);
-  assert.equal(db.one('SELECT COUNT(*) n FROM org_members WHERE org_id=?', o.org.id).n, 1, 'não vira membro só com o CNPJ');
+  assert.equal((await db.one('SELECT COUNT(*) n FROM org_members WHERE org_id=?', o.org.id)).n, 1, 'não vira membro só com o CNPJ');
   await c.post('/organizador/cadastro/solicitar-acesso', { org_id: o.org.id, message: 'Sou sócio e preciso de acesso ao painel.' });
-  assert.equal(db.one("SELECT COUNT(*) n FROM org_access_requests WHERE org_id=? AND status='pending'", o.org.id).n, 1);
-  assert.ok(db.one("SELECT 1 FROM outbox WHERE to_email=? AND subject LIKE 'Solicitação de acesso%'", o.email));
+  assert.equal((await db.one("SELECT COUNT(*) n FROM org_access_requests WHERE org_id=? AND status='pending'", o.org.id)).n, 1);
+  assert.ok(await db.one("SELECT 1 FROM outbox WHERE to_email=? AND subject ILIKE 'Solicitação de acesso%'", o.email));
 });
 
 test('consulta cadastral: não configurada, indisponível, não encontrada e sucesso', async () => {
@@ -76,19 +77,19 @@ test('isolamento: outra empresa, documentos privados, exportações e API', asyn
   }
   const p = await B.c.post(`/organizador/eventos/${evA.id}/itens/lot`, { name: 'hack', price: '1' });
   assert.equal(p.status, 404);
-  assert.equal(db.one("SELECT COUNT(*) n FROM lots WHERE event_id=? AND name='hack'", evA.id).n, 0);
+  assert.equal((await db.one("SELECT COUNT(*) n FROM lots WHERE event_id=? AND name='hack'", evA.id)).n, 0);
   // Rascunho de A não é público
   const anon = new h.Client();
   assert.equal((await anon.get(`/e/${evA.slug}`)).status, 404);
   // Documentos privados: não servidos pela pasta pública; rota admin exige perfil de administração
-  const doc = db.one('SELECT * FROM documents WHERE org_id=?', A.org.id);
+  const doc = await db.one('SELECT * FROM documents WHERE org_id=?', A.org.id);
   assert.equal((await anon.get(`/media/${doc.storage_key}`)).status, 404);
   const tryDoc = await B.c.get(`/admin/documentos/${doc.id}`);
   assert.equal(tryDoc.status, 403);
-  const admin = new h.Client(); await h.login(admin, h.makeAdmin()); await admin.post('/contexto', { context: 'admin' });
+  const admin = new h.Client(); await h.login(admin, await h.makeAdmin()); await admin.post('/contexto', { context: 'admin' });
   const ok = await admin.get(`/admin/documentos/${doc.id}`);
   assert.equal(ok.status, 200);
-  assert.ok(db.one("SELECT 1 FROM audit_log WHERE action='document.viewed' AND entity_id=?", String(doc.id)), 'consulta registrada');
+  assert.ok(await db.one("SELECT 1 FROM audit_log WHERE action='document.viewed' AND entity_id=?", String(doc.id)), 'consulta registrada');
   // Não pode trocar para o contexto de empresa da qual não é membro
   const ctx = await B.c.post('/contexto', { context: `org:${A.org.id}` });
   assert.equal(ctx.status, 403);
@@ -99,7 +100,7 @@ test('isolamento: outra empresa, documentos privados, exportações e API', asyn
   const res = await fetch(`${base}/api/v1/events/${evA.id}/registrations`, { headers: { Authorization: `Bearer ${key}` } });
   assert.equal(res.status, 404);
   const own = await fetch(`${base}/api/v1/events`, { headers: { Authorization: `Bearer ${key}` } }).then((x) => x.json());
-  assert.ok(own.data.every((e) => db.one('SELECT org_id FROM events WHERE id=?', e.id).org_id === B.org.id));
+  assert.ok(await everyAsync(own.data, async (e) => (await db.one('SELECT org_id FROM events WHERE id=?', e.id)).org_id === B.org.id));
   assert.equal((await fetch(`${base}/api/v1/events`, { headers: { Authorization: 'Bearer invalida' } })).status, 401);
 });
 
@@ -122,13 +123,13 @@ test('mesmo usuário com perfis de atleta e organizador, alternando contexto', a
   await a.c.get('/organizador/cadastro');
   const r = await a.c.post('/organizador/cadastro/1', { acao: 'avancar' });
   assert.match(r.text, /Empresa e documentação/);
-  assert.equal(db.one('SELECT COUNT(*) n FROM users WHERE email=?', a.email).n, 1);
+  assert.equal((await db.one('SELECT COUNT(*) n FROM users WHERE email=?', a.email)).n, 1);
 });
 
 test('pendências bloqueiam publicação; evento gratuito publica sem integração financeira', async () => {
   const o = await f.organizer({ payments: false });
   const draft = await f.event(o.c, { publish: false });
-  db.run('UPDATE events SET regulation=NULL WHERE id=?', draft.id);
+  await db.run('UPDATE events SET regulation=NULL WHERE id=?', draft.id);
   const rv = await o.c.get(`/organizador/eventos/${draft.id}/editar?etapa=9`);
   assert.match(rv.text, /Adicione o regulamento/);
   assert.match(rv.text, /configure o recebimento/);
@@ -137,7 +138,7 @@ test('pendências bloqueiam publicação; evento gratuito publica sem integraç�
   const a = await f.athlete();
   const { order } = await f.register(a, free);
   assert.equal(order.status, 'free');
-  assert.equal(db.one('SELECT status FROM registrations WHERE order_id=?', order.id).status, 'confirmed');
+  assert.equal((await db.one('SELECT status FROM registrations WHERE order_id=?', order.id)).status, 'confirmed');
 });
 
 test('duplicar evento como rascunho sem inscrições, transações ou resultados', async () => {
@@ -145,10 +146,10 @@ test('duplicar evento como rascunho sem inscrições, transações ou resultados
   const ev = await f.event(o.c, { price: '0' });
   const a = await f.athlete(); await f.register(a, ev);
   await o.c.post(`/organizador/eventos/${ev.id}/duplicar`, {});
-  const copy = db.one('SELECT * FROM events WHERE org_id=? AND id<>? ORDER BY id DESC', o.org.id, ev.id);
+  const copy = await db.one('SELECT * FROM events WHERE org_id=? AND id<>? ORDER BY id DESC', o.org.id, ev.id);
   assert.equal(copy.status, 'draft');
-  assert.equal(db.one('SELECT COUNT(*) n FROM registrations WHERE event_id=?', copy.id).n, 0);
-  assert.equal(db.one('SELECT COUNT(*) n FROM orders WHERE event_id=?', copy.id).n, 0);
-  assert.equal(db.one('SELECT COUNT(*) n FROM modalities WHERE event_id=?', copy.id).n, 2);
-  assert.ok(db.one('SELECT COUNT(*) n FROM lots WHERE event_id=? AND starts_utc IS NULL', copy.id).n >= 1);
+  assert.equal((await db.one('SELECT COUNT(*) n FROM registrations WHERE event_id=?', copy.id)).n, 0);
+  assert.equal((await db.one('SELECT COUNT(*) n FROM orders WHERE event_id=?', copy.id)).n, 0);
+  assert.equal((await db.one('SELECT COUNT(*) n FROM modalities WHERE event_id=?', copy.id)).n, 2);
+  assert.ok((await db.one('SELECT COUNT(*) n FROM lots WHERE event_id=? AND starts_utc IS NULL', copy.id)).n >= 1);
 });

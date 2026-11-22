@@ -16,19 +16,19 @@ const r = express.Router();
 r.use((req, res, next) => (req.path.startsWith('/cadastro') ? next('router') : next()));
 r.use(requireOrg);
 
-const visibleEvents = (req) => {
-  const evs = db.all('SELECT * FROM events WHERE org_id=? ORDER BY COALESCE(start_utc, created_at) DESC', req.org.id);
+const visibleEvents = async (req) => {
+  const evs = await db.all('SELECT * FROM events WHERE org_id=? ORDER BY COALESCE(start_utc, created_at) DESC', req.org.id);
   return req.member.eventIds ? evs.filter((e) => req.member.eventIds.includes(e.id)) : evs;
 };
 const sub = (req, active) => html`<nav class="subnav" aria-label="Organizador">${[['/organizador', 'Painel'], ['/organizador/eventos', 'Eventos'], ['/organizador/financeiro', 'Financeiro'], ['/organizador/equipe', 'Equipe'], ['/organizador/empresa', 'Empresa'], ['/organizador/recebimentos', 'Recebimentos'], ['/organizador/suporte', 'Suporte']].map(([h, l]) => html`<a href="${h}" ${active === h ? raw('aria-current="page"') : ''}>${l}</a>`)}</nav>`;
 const orgHeader = (req, active) => html`<div class="org-head"><div><p class="muted">Organizador</p><h1>${req.org.trade_name || req.org.legal_name}</h1></div>${badge(ORG_STATUS[req.org.status].label, ORG_STATUS[req.org.status].tone)}</div>${sub(req, active)}`;
 r.locals = { orgHeader, visibleEvents };
 
-r.get('/', (req, res) => {
-  const org = req.org; const act = activation(org); const owner = ownerOf(org.id);
-  const evs = visibleEvents(req);
+r.get('/', async (req, res) => {
+  const org = req.org; const act = await activation(org); const owner = await ownerOf(org.id);
+  const evs = await visibleEvents(req);
   const first = evs[evs.length - 1];
-  const hasMods = first && db.one('SELECT COUNT(*) n FROM modalities WHERE event_id=?', first.id).n > 0 && db.one('SELECT COUNT(*) n FROM lots WHERE event_id=?', first.id).n > 0;
+  const hasMods = first && (await db.one('SELECT COUNT(*) n FROM modalities WHERE event_id=?', first.id)).n > 0 && (await db.one('SELECT COUNT(*) n FROM lots WHERE event_id=?', first.id)).n > 0;
   const tasks = [
     [act.items.email, 'Confirmar e-mail', owner?.email_verified_at ? null : '/minha-conta', 'Enviamos um link para o e-mail do responsável.'],
     [act.items.company && act.items.documents, 'Completar empresa e documentação', '/organizador/empresa', 'Dados da empresa, contatos e documentos.'],
@@ -40,7 +40,8 @@ r.get('/', (req, res) => {
     [!!evs.find((e) => e.status !== 'draft'), 'Revisar e publicar', first ? `/organizador/eventos/${first.id}/editar?etapa=9` : '/organizador/eventos/novo', ''],
   ];
   const done = tasks.filter((t) => t[0]).length;
-  const totals = evs.reduce((a, e) => { const s = eventStats(e.id); a.c += s.confirmed; a.g += s.gross; a.p += s.reserved; a.x += s.cancelled; a.req += s.open_requests; return a; }, { c: 0, g: 0, p: 0, x: 0, req: 0 });
+  const totals = { c: 0, g: 0, p: 0, x: 0, req: 0 };
+  for (const e of evs) { const s = await eventStats(e.id); totals.c += s.confirmed; totals.g += s.gross; totals.p += s.reserved; totals.x += s.cancelled; totals.req += s.open_requests; }
   res.page({ title: 'Painel do organizador', wide: true, body: html`${orgHeader(req, '/organizador')}
   ${org.status === 'correction_requested' ? html`<div class="alert alert-error"><strong>Correção solicitada pela equipe de verificação:</strong> ${org.status_note || ''} <a href="/organizador/empresa">Corrigir agora</a></div>` : ''}
   ${org.status === 'suspended' ? html`<div class="alert alert-error">Conta suspensa: publicação e recebimentos bloqueados. ${org.status_note || ''} Fale com o suporte.</div>` : ''}
@@ -53,19 +54,19 @@ r.get('/', (req, res) => {
   <section class="card"><div class="section-head"><h2>Eventos</h2>${can(req.member, 'events') ? html`<a class="btn" href="/organizador/eventos/novo">Criar evento</a>` : ''}</div>${eventsTable(req, evs)}</section>` });
 });
 
-function eventsTable(req, evs) {
-  return table(['Evento', 'Data', 'Situação', 'Inscritos', 'Ações'], evs.map((e) => {
-    const s = eventStats(e.id); const ps = PUBLIC_STATUS[publicStatus(e)];
+async function eventsTable(req, evs) {
+  return table(['Evento', 'Data', 'Situação', 'Inscritos', 'Ações'], await Promise.all(evs.map(async (e) => {
+    const s = await eventStats(e.id); const ps = PUBLIC_STATUS[await publicStatus(e)];
     return [html`<a href="/organizador/eventos/${e.id}">${e.name}</a>`, e.start_utc ? fmtDate(e.start_utc, e.timezone) : '—', badge(ps.label, ps.tone), String(s.confirmed),
       html`<a href="/organizador/eventos/${e.id}">Gerenciar</a>${can(req.member, 'events', e.id) ? html` · <a href="/organizador/eventos/${e.id}/editar">Editar</a>` : ''}`];
-  }), { emptyMsg: 'Nenhum evento ainda. Crie o primeiro — ele fica em rascunho até você publicar.' });
+  })), { emptyMsg: 'Nenhum evento ainda. Crie o primeiro — ele fica em rascunho até você publicar.' });
 }
-r.get('/eventos', (req, res) => res.page({ title: 'Eventos', wide: true, body: html`${orgHeader(req, '/organizador/eventos')}<section class="card"><div class="section-head"><h2>Eventos</h2>${can(req.member, 'events') ? html`<a class="btn" href="/organizador/eventos/novo">Criar evento</a>` : ''}</div>${eventsTable(req, visibleEvents(req))}</section>` }));
+r.get('/eventos', async (req, res) => res.page({ title: 'Eventos', wide: true, body: html`${orgHeader(req, '/organizador/eventos')}<section class="card"><div class="section-head"><h2>Eventos</h2>${can(req.member, 'events') ? html`<a class="btn" href="/organizador/eventos/novo">Criar evento</a>` : ''}</div>${eventsTable(req, await visibleEvents(req))}</section>` }));
 
 // Empresa: edição e reenvio para verificação
-r.get('/empresa', (req, res) => {
+r.get('/empresa', async (req, res) => {
   const o = req.org; const a = json(o.address, {});
-  const docs = db.all('SELECT * FROM documents WHERE org_id=? ORDER BY id DESC', o.id);
+  const docs = await db.all('SELECT * FROM documents WHERE org_id=? ORDER BY id DESC', o.id);
   const isOwner = req.member.role === 'owner';
   res.page({ title: 'Empresa', wide: true, body: html`${orgHeader(req, '/organizador/empresa')}
   <section class="card"><h2>Dados da empresa</h2><p>CNPJ ${fmtCnpj(o.cnpj)} · Origem: ${o.cnpj_source === 'manual' ? 'preenchimento manual (pendente de verificação)' : o.cnpj_source.replace('provider:', 'consulta cadastral — ')}${o.cnpj_status ? ` · Situação cadastral: ${o.cnpj_status}` : ''}</p>
@@ -80,7 +81,7 @@ r.get('/empresa', (req, res) => {
   ${isOwner ? html`<form method="post" action="/organizador/api-key" data-confirm="Gerar nova chave revoga a anterior. Continuar?">${csrf(req)}<button class="btn btn-ghost btn-sm">Gerar chave de API</button> <a href="/api/docs">Documentação da API</a></form>` : ''}
   <p class="muted">Documentos ficam em área privada. Nem a equipe do organizador consegue baixá-los por aqui; apenas a equipe de verificação, com registro de acesso.</p></section>` });
 });
-r.post('/empresa', (req, res) => {
+r.post('/empresa', async (req, res) => {
   if (req.member.role !== 'owner') throw new UserError('Somente o responsável pode alterar dados da empresa.', 403);
   const b = req.body; const o = req.org;
   if (!b.legal_name || !b.trade_name || !b.city || !b.state) throw new UserError('Preencha razão social, nome fantasia, cidade e UF.');
@@ -88,10 +89,10 @@ r.post('/empresa', (req, res) => {
   if (b.website && !isUrl(b.website)) throw new UserError('Site inválido: use https://');
   const a = { ...json(o.address, {}), city: b.city, state: b.state, street: b.street };
   const legalChanged = b.legal_name.trim() !== o.legal_name;
-  db.run('UPDATE organizations SET legal_name=?, trade_name=?, address=?, support_email=?, support_phone=?, website=?, bio=?, cnpj_source=CASE WHEN ? THEN \'manual\' ELSE cnpj_source END WHERE id=?',
+  await db.run('UPDATE organizations SET legal_name=?, trade_name=?, address=?, support_email=?, support_phone=?, website=?, bio=?, cnpj_source=CASE WHEN ? THEN \'manual\' ELSE cnpj_source END WHERE id=?',
     b.legal_name.trim(), b.trade_name.trim(), JSON.stringify(a), b.support_email.trim(), b.support_phone.trim(), b.website || null, b.bio || null, legalChanged ? 1 : 0, o.id);
-  if (o.status === 'correction_requested') { db.run("UPDATE organizations SET status='verification_pending', status_note=NULL WHERE id=?", o.id); refreshStatus(o.id); }
-  audit(req, 'org.updated', { orgId: o.id, entity: 'organization', entityId: o.id, detail: { legalChanged } });
+  if (o.status === 'correction_requested') { await db.run("UPDATE organizations SET status='verification_pending', status_note=NULL WHERE id=?", o.id); await refreshStatus(o.id); }
+  await audit(req, 'org.updated', { orgId: o.id, entity: 'organization', entityId: o.id, detail: { legalChanged } });
   res.flash('success', o.status === 'correction_requested' ? 'Dados salvos e reenviados para verificação.' : 'Dados salvos.');
   res.redirect(303, '/organizador/empresa');
 });
@@ -101,17 +102,17 @@ r.get('/empresa/documentos', (req, res) => res.page({ title: 'Documentos', body:
   <div class="field"><label for="identity">Documento oficial do responsável (PDF/JPG/PNG até 5 MB)</label><input type="file" id="identity" name="identity"></div>
   <div class="field"><label for="link_doc">Comprovante de vínculo (PDF/JPG/PNG até 5 MB)</label><input type="file" id="link_doc" name="link_doc"></div>
   <button class="btn">Enviar</button> <a href="/organizador/empresa">Cancelar</a></form></section>` }));
-r.post('/empresa/documentos', require('../lib/guards').upload(5).fields([{ name: 'logo' }, { name: 'identity' }, { name: 'link_doc' }]), require('../lib/guards').csrfAfterMultipart, (req, res) => {
+r.post('/empresa/documentos', require('../lib/guards').upload(5).fields([{ name: 'logo' }, { name: 'identity' }, { name: 'link_doc' }]), require('../lib/guards').csrfAfterMultipart, async (req, res) => {
   if (req.member.role !== 'owner') throw new UserError('Somente o responsável pode enviar documentos.', 403);
   const { checkFile, store } = require('../lib/guards');
   const logo = checkFile(req.files?.logo?.[0], ['image/png', 'image/jpeg', 'image/webp'], 'Logomarca');
   if (logo && logo.size > 2 * 1024 * 1024) throw new UserError('Logomarca acima de 2 MB.');
-  if (logo) db.run('UPDATE organizations SET logo_path=? WHERE id=?', store(logo, { isPrivate: false }), req.org.id);
+  if (logo) await db.run('UPDATE organizations SET logo_path=? WHERE id=?', store(logo, { isPrivate: false }), req.org.id);
   for (const [kind, name] of [['identity', 'identity'], ['link_proof', 'link_doc']]) {
     const f = checkFile(req.files?.[name]?.[0], ['application/pdf', 'image/png', 'image/jpeg'], 'Documento');
     if (!f) continue;
-    db.run('INSERT INTO documents(org_id,user_id,kind,storage_key,original_name,mime,size) VALUES(?,?,?,?,?,?,?)', req.org.id, req.user.id, kind, store(f, { isPrivate: true }), f.originalname.slice(0, 120), f.mimetype, f.size);
-    audit(req, 'document.uploaded', { orgId: req.org.id, entity: 'document', detail: { kind } });
+    await db.run('INSERT INTO documents(org_id,user_id,kind,storage_key,original_name,mime,size) VALUES(?,?,?,?,?,?,?)', req.org.id, req.user.id, kind, store(f, { isPrivate: true }), f.originalname.slice(0, 120), f.mimetype, f.size);
+    await audit(req, 'document.uploaded', { orgId: req.org.id, entity: 'document', detail: { kind } });
   }
   res.flash('success', 'Arquivos enviados.');
   res.redirect(303, '/organizador/empresa');
@@ -131,20 +132,20 @@ r.get('/recebimentos', (req, res) => {
   ${['blocked_undecided', 'disabled'].includes(config.mp.mode) ? html`<div class="alert alert-warn">Recebimentos reais ainda não estão habilitados nesta plataforma. Eventos gratuitos podem ser publicados normalmente.</div>` : ''}
   ${tip('Pix e cartão são oferecidos conforme disponibilidade do produto Mercado Pago integrado. Parcelamento, repasse imediato e divisão automática de valores não são prometidos nesta versão.')}</section>` });
 });
-r.post('/recebimentos/teste', (req, res) => {
+r.post('/recebimentos/teste', async (req, res) => {
   if (req.member.role !== 'owner') throw new UserError('Somente o responsável pode configurar recebimentos.', 403);
   if (!['simulator', 'mp_test'].includes(config.mp.mode)) throw new UserError('Ambiente de testes indisponível.');
-  db.run("UPDATE organizations SET mp_status='test', mp_configured_at=? WHERE id=?", nowIso(), req.org.id);
-  audit(req, 'org.payments_test_enabled', { orgId: req.org.id });
+  await db.run("UPDATE organizations SET mp_status='test', mp_configured_at=? WHERE id=?", nowIso(), req.org.id);
+  await audit(req, 'org.payments_test_enabled', { orgId: req.org.id });
   res.flash('success', 'Recebimento configurado em ambiente de testes.');
   res.redirect(303, '/organizador/recebimentos');
 });
 
 // Equipe e colaboradores
-r.get('/equipe', (req, res) => {
-  const members = db.all('SELECT m.*, u.name, u.email FROM org_members m JOIN users u ON u.id=m.user_id WHERE m.org_id=?', req.org.id);
-  const reqs = db.all("SELECT a.*, u.name, u.email FROM org_access_requests a JOIN users u ON u.id=a.user_id WHERE a.org_id=? AND a.status='pending'", req.org.id);
-  const evs = db.all('SELECT id, name FROM events WHERE org_id=?', req.org.id);
+r.get('/equipe', async (req, res) => {
+  const members = await db.all('SELECT m.*, u.name, u.email FROM org_members m JOIN users u ON u.id=m.user_id WHERE m.org_id=?', req.org.id);
+  const reqs = await db.all("SELECT a.*, u.name, u.email FROM org_access_requests a JOIN users u ON u.id=a.user_id WHERE a.org_id=? AND a.status='pending'", req.org.id);
+  const evs = await db.all('SELECT id, name FROM events WHERE org_id=?', req.org.id);
   const isOwner = req.member.role === 'owner';
   res.page({ title: 'Equipe', wide: true, body: html`${orgHeader(req, '/organizador/equipe')}
   <section class="card"><h2>Colaboradores</h2>${table(['Nome', 'E-mail', 'Papel', 'Funções', 'Eventos', ''], members.map((m) => [m.name, m.email, m.role === 'owner' ? 'Responsável' : 'Colaborador', m.role === 'owner' ? 'Todas' : json(m.permissions, []).map((p) => PERMS[p]).join(', '), m.event_ids ? json(m.event_ids, []).map((id) => evs.find((e) => e.id === id)?.name).join(', ') : 'Todos',
@@ -156,45 +157,45 @@ r.get('/equipe', (req, res) => {
   <button class="btn">Salvar colaborador</button></form></section>
   <section class="card"><h2>Solicitações de acesso à empresa</h2>${table(['Pessoa', 'Mensagem', 'Data', ''], reqs.map((a) => [`${a.name} (${a.email})`, a.message, fmtDateTime(a.created_at), html`<form method="post" action="/organizador/equipe/solicitacao" class="inline">${csrf(req)}<input type="hidden" name="id" value="${a.id}"><button name="decisao" value="approve" class="btn btn-sm">Aprovar como colaborador (sem funções)</button> <button name="decisao" value="deny" class="btn btn-sm btn-ghost">Recusar</button></form>`]), { emptyMsg: 'Nenhuma solicitação pendente.' })}</section>` : ''}` });
 });
-r.post('/equipe', (req, res) => {
+r.post('/equipe', async (req, res) => {
   if (req.member.role !== 'owner') throw new UserError('Somente o responsável gerencia a equipe.', 403);
   const email = String(req.body.email || '').trim();
-  const u = db.one('SELECT * FROM users WHERE email=?', email);
-  if (!u) { if (isEmail(email)) sendMail(email, `Convite para a equipe de ${req.org.trade_name}`, `Você foi convidado(a) para colaborar com ${req.org.trade_name}. Crie sua conta em ${config.baseUrl}/cadastro e avise o responsável para concluir a inclusão.`); res.flash('info', 'Pessoa sem conta: enviamos convite por e-mail. Após o cadastro, adicione-a novamente.'); return res.redirect(303, '/organizador/equipe'); }
+  const u = await db.one('SELECT * FROM users WHERE email=?', email);
+  if (!u) { if (isEmail(email)) await sendMail(email, `Convite para a equipe de ${req.org.trade_name}`, `Você foi convidado(a) para colaborar com ${req.org.trade_name}. Crie sua conta em ${config.baseUrl}/cadastro e avise o responsável para concluir a inclusão.`); res.flash('info', 'Pessoa sem conta: enviamos convite por e-mail. Após o cadastro, adicione-a novamente.'); return res.redirect(303, '/organizador/equipe'); }
   const permsSel = Object.keys(PERMS).filter((k) => req.body[`perm_${k}`]);
-  const evIds = db.all('SELECT id FROM events WHERE org_id=?', req.org.id).map((e) => e.id).filter((id) => req.body[`ev_${id}`]);
-  const existing = db.one('SELECT * FROM org_members WHERE org_id=? AND user_id=?', req.org.id, u.id);
+  const evIds = (await db.all('SELECT id FROM events WHERE org_id=?', req.org.id)).map((e) => e.id).filter((id) => req.body[`ev_${id}`]);
+  const existing = await db.one('SELECT * FROM org_members WHERE org_id=? AND user_id=?', req.org.id, u.id);
   if (existing?.role === 'owner') throw new UserError('O responsável já possui acesso total.');
-  if (existing) db.run('UPDATE org_members SET permissions=?, event_ids=? WHERE org_id=? AND user_id=?', JSON.stringify(permsSel), evIds.length ? JSON.stringify(evIds) : null, req.org.id, u.id);
-  else db.run("INSERT INTO org_members(org_id,user_id,role,permissions,event_ids) VALUES(?,?,'collaborator',?,?)", req.org.id, u.id, JSON.stringify(permsSel), evIds.length ? JSON.stringify(evIds) : null);
-  audit(req, 'org.member_saved', { orgId: req.org.id, entity: 'user', entityId: u.id, detail: { permsSel, evIds } });
-  sendMail(u.email, `Acesso à equipe de ${req.org.trade_name}`, `Você agora colabora com ${req.org.trade_name}. Selecione o perfil da empresa no menu do seu painel.`);
+  if (existing) await db.run('UPDATE org_members SET permissions=?, event_ids=? WHERE org_id=? AND user_id=?', JSON.stringify(permsSel), evIds.length ? JSON.stringify(evIds) : null, req.org.id, u.id);
+  else await db.run("INSERT INTO org_members(org_id,user_id,role,permissions,event_ids) VALUES(?,?,'collaborator',?,?)", req.org.id, u.id, JSON.stringify(permsSel), evIds.length ? JSON.stringify(evIds) : null);
+  await audit(req, 'org.member_saved', { orgId: req.org.id, entity: 'user', entityId: u.id, detail: { permsSel, evIds } });
+  await sendMail(u.email, `Acesso à equipe de ${req.org.trade_name}`, `Você agora colabora com ${req.org.trade_name}. Selecione o perfil da empresa no menu do seu painel.`);
   res.flash('success', 'Colaborador salvo.');
   res.redirect(303, '/organizador/equipe');
 });
-r.post('/equipe/remover', (req, res) => {
+r.post('/equipe/remover', async (req, res) => {
   if (req.member.role !== 'owner') throw new UserError('Somente o responsável gerencia a equipe.', 403);
-  db.run("DELETE FROM org_members WHERE org_id=? AND user_id=? AND role<>'owner'", req.org.id, Number(req.body.user_id));
-  db.run("UPDATE sessions SET context='athlete' WHERE user_id=? AND context=?", Number(req.body.user_id), `org:${req.org.id}`);
-  audit(req, 'org.member_removed', { orgId: req.org.id, entity: 'user', entityId: req.body.user_id });
+  await db.run("DELETE FROM org_members WHERE org_id=? AND user_id=? AND role<>'owner'", req.org.id, Number(req.body.user_id));
+  await db.run("UPDATE sessions SET context='athlete' WHERE user_id=? AND context=?", Number(req.body.user_id), `org:${req.org.id}`);
+  await audit(req, 'org.member_removed', { orgId: req.org.id, entity: 'user', entityId: req.body.user_id });
   res.redirect(303, '/organizador/equipe');
 });
-r.post('/equipe/solicitacao', (req, res) => {
+r.post('/equipe/solicitacao', async (req, res) => {
   if (req.member.role !== 'owner') throw new UserError('Somente o responsável decide.', 403);
-  const a = db.one("SELECT * FROM org_access_requests WHERE id=? AND org_id=? AND status='pending'", Number(req.body.id), req.org.id);
+  const a = await db.one("SELECT * FROM org_access_requests WHERE id=? AND org_id=? AND status='pending'", Number(req.body.id), req.org.id);
   if (!a) throw new UserError('Solicitação não encontrada.');
   const ok = req.body.decisao === 'approve';
-  db.run('UPDATE org_access_requests SET status=?, decided_by=?, decided_at=? WHERE id=?', ok ? 'approved' : 'denied', req.user.id, nowIso(), a.id);
-  if (ok) db.run("INSERT OR IGNORE INTO org_members(org_id,user_id,role,permissions) VALUES(?,?,'collaborator','[]')", req.org.id, a.user_id);
-  audit(req, 'org.access_request_decided', { orgId: req.org.id, entity: 'access_request', entityId: a.id, detail: { ok } });
+  await db.run('UPDATE org_access_requests SET status=?, decided_by=?, decided_at=? WHERE id=?', ok ? 'approved' : 'denied', req.user.id, nowIso(), a.id);
+  if (ok) await db.run("INSERT INTO org_members(org_id,user_id,role,permissions) VALUES(?,?,'collaborator','[]') ON CONFLICT DO NOTHING", req.org.id, a.user_id);
+  await audit(req, 'org.access_request_decided', { orgId: req.org.id, entity: 'access_request', entityId: a.id, detail: { ok } });
   res.redirect(303, '/organizador/equipe');
 });
 
 // Financeiro
-function finance(eventIds) {
+async function finance(eventIds) {
   if (!eventIds.length) return [];
   const ph = eventIds.map(() => '?').join(',');
-  return db.all(`SELECT e.id, e.name,
+  return await db.all(`SELECT e.id, e.name,
     COALESCE(SUM(CASE WHEN o.status IN ('paid','refunded','partially_refunded') THEN o.subtotal_cents END),0) gross,
     COALESCE(SUM(CASE WHEN o.status IN ('paid','refunded','partially_refunded') THEN o.discount_cents END),0) discounts,
     COALESCE(SUM(CASE WHEN o.status IN ('paid','refunded','partially_refunded') THEN o.fee_cents + o.organizer_fee_cents END),0) fees,
@@ -204,11 +205,11 @@ function finance(eventIds) {
     COUNT(CASE WHEN o.status='exception' THEN 1 END) exceptions
     FROM events e LEFT JOIN orders o ON o.event_id=e.id WHERE e.id IN (${ph}) GROUP BY e.id ORDER BY e.start_utc DESC`, ...eventIds);
 }
-r.get('/financeiro', perm('finance'), (req, res) => {
-  const evs = visibleEvents(req).filter((e) => can(req.member, 'finance', e.id));
-  const rows = finance(evs.map((e) => e.id));
+r.get('/financeiro', perm('finance'), async (req, res) => {
+  const evs = (await visibleEvents(req)).filter((e) => can(req.member, 'finance', e.id));
+  const rows = await finance(evs.map((e) => e.id));
   const net = (x) => x.gross - x.discounts - x.fees_org - x.refunds;
-  const rec = reconciliation(evs.map((e) => e.id)).slice(0, 100);
+  const rec = (await reconciliation(evs.map((e) => e.id))).slice(0, 100);
   res.page({ title: 'Financeiro', wide: true, body: html`${orgHeader(req, '/organizador/financeiro')}
   <section class="card"><div class="section-head"><h2>Resumo por evento</h2><a class="btn btn-ghost" href="/organizador/financeiro.csv">Exportar CSV</a></div>
   ${tip('Previsto = pedidos aguardando pagamento. Confirmado = pagamentos aprovados e validados. Disponível para saque é informado pelo Mercado Pago e depende do modelo de recebimento; consulte o painel do provedor.')}
@@ -216,32 +217,32 @@ r.get('/financeiro', perm('finance'), (req, res) => {
   <section class="card"><h2>Conciliação com o provedor</h2>${table(['Pedido', 'Situação do pedido', 'Valor', 'Transação', 'Situação no provedor', 'Reembolsado', 'Conferência'], rec.map((x) => [x.code, x.order_status, brl(x.total_cents), x.provider_payment_id ? `${x.provider} · ${x.provider_payment_id}` : '—', x.pay_status ? PAY_LABEL[x.pay_status] : '—', brl(x.refunded_cents), x.check_result === 'OK' ? badge('OK', 'ok') : badge(x.check_result, 'danger')]), { emptyMsg: 'Sem transações.' })}
   <p class="muted">Pedidos pendentes sem transação aparecem como "Pedido sem pagamento" enquanto aguardam o atleta.</p></section>` });
 });
-r.get('/financeiro.csv', perm('finance'), (req, res) => {
-  const evs = visibleEvents(req).filter((e) => can(req.member, 'finance', e.id));
-  const rows = finance(evs.map((e) => e.id));
-  audit(req, 'export.finance', { orgId: req.org.id });
+r.get('/financeiro.csv', perm('finance'), async (req, res) => {
+  const evs = (await visibleEvents(req)).filter((e) => can(req.member, 'finance', e.id));
+  const rows = await finance(evs.map((e) => e.id));
+  await audit(req, 'export.finance', { orgId: req.org.id });
   res.type('text/csv').attachment('financeiro.csv').send(toCsv(rows, [{ label: 'Evento', key: 'name' }, { label: 'Vendas brutas', value: (x) => (x.gross / 100).toFixed(2) }, { label: 'Descontos', value: (x) => (x.discounts / 100).toFixed(2) }, { label: 'Taxas organizador', value: (x) => (x.fees_org / 100).toFixed(2) }, { label: 'Reembolsos', value: (x) => (x.refunds / 100).toFixed(2) }, { label: 'Líquido', value: (x) => ((x.gross - x.discounts - x.fees_org - x.refunds) / 100).toFixed(2) }, { label: 'Previsto', value: (x) => (x.predicted / 100).toFixed(2) }]));
 });
 
 // Suporte
-r.get('/suporte', (req, res) => {
-  const t = db.all('SELECT * FROM support_tickets WHERE org_id=? ORDER BY id DESC', req.org.id);
+r.get('/suporte', async (req, res) => {
+  const t = await db.all('SELECT * FROM support_tickets WHERE org_id=? ORDER BY id DESC', req.org.id);
   res.page({ title: 'Suporte', wide: true, body: html`${orgHeader(req, '/organizador/suporte')}<section class="card"><h2>Solicitar suporte</h2><form method="post" action="/organizador/suporte">${csrf(req)}${field('subject', 'Assunto', { required: true })}${field('body', 'Descreva o que precisa', { type: 'textarea', required: true })}<button class="btn">Enviar</button></form></section>
   <section class="card"><h2>Minhas solicitações</h2>${table(['Assunto', 'Situação', 'Resposta', 'Data'], t.map((x) => [x.subject, x.status === 'open' ? badge('Aberta', 'warn') : badge('Respondida', 'ok'), x.response || '—', fmtDateTime(x.created_at)]), { emptyMsg: 'Nenhuma solicitação.' })}</section>` });
 });
-r.post('/suporte', (req, res) => {
+r.post('/suporte', async (req, res) => {
   if (!req.body.subject || !req.body.body) throw new UserError('Informe assunto e descrição.');
-  db.run('INSERT INTO support_tickets(user_id,org_id,subject,body) VALUES(?,?,?,?)', req.user.id, req.org.id, req.body.subject.slice(0, 200), req.body.body.slice(0, 4000));
+  await db.run('INSERT INTO support_tickets(user_id,org_id,subject,body) VALUES(?,?,?,?)', req.user.id, req.org.id, req.body.subject.slice(0, 200), req.body.body.slice(0, 4000));
   res.flash('success', 'Solicitação enviada à equipe da plataforma.');
   res.redirect(303, '/organizador/suporte');
 });
 
 // Chave de API (escopo: esta organização)
-r.post('/api-key', (req, res) => {
+r.post('/api-key', async (req, res) => {
   if (req.member.role !== 'owner') throw new UserError('Somente o responsável gera chaves.', 403);
   const key = `org_${req.org.id}_${randomToken(24)}`;
-  db.run('UPDATE organizations SET api_key_hash=? WHERE id=?', sha256(key), req.org.id);
-  audit(req, 'org.api_key_rotated', { orgId: req.org.id });
+  await db.run('UPDATE organizations SET api_key_hash=? WHERE id=?', sha256(key), req.org.id);
+  await audit(req, 'org.api_key_rotated', { orgId: req.org.id });
   res.page({ title: 'Chave de API', body: html`<section class="card"><h1>Nova chave de API</h1><p>Copie agora; ela não será exibida novamente. A chave anterior foi revogada.</p><pre class="code">${key}</pre><a class="btn" href="/api/docs">Ver documentação</a></section>` });
 });
 

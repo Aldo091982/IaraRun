@@ -12,15 +12,15 @@ const { requireUser } = require('../lib/guards');
 const r = express.Router();
 const safeBack = (v, fb) => (typeof v === 'string' && v.startsWith('/') && !v.startsWith('//') ? v : fb);
 
-function startSession(req, res, user, context) {
+async function startSession(req, res, user, context) {
   const id = randomToken(32);
-  const ctx = context || db.one('SELECT context FROM sessions WHERE user_id=? ORDER BY expires_at DESC LIMIT 1', user.id)?.context || 'athlete';
-  db.run('INSERT INTO sessions(id,user_id,context,csrf,expires_at) VALUES(?,?,?,?,?)', id, user.id, ctx, randomToken(18), new Date(Date.now() + 14 * 864e5).toISOString());
+  const ctx = context || (await db.one('SELECT context FROM sessions WHERE user_id=? ORDER BY expires_at DESC LIMIT 1', user.id))?.context || 'athlete';
+  await db.run('INSERT INTO sessions(id,user_id,context,csrf,expires_at) VALUES(?,?,?,?,?)', id, user.id, ctx, randomToken(18), new Date(Date.now() + 14 * 864e5).toISOString());
   res.setCookie('sid', id, { maxAge: 14 * 864e5 });
 }
-function sendVerification(user) {
-  const t = issueToken(user.id, 'verify', 60 * 48);
-  sendMail(user.email, 'Confirme seu e-mail', `Olá, ${user.name}! Confirme seu e-mail acessando: ${config.baseUrl}/confirmar-email?t=${t}\nO link vale por 48 horas.`);
+async function sendVerification(user) {
+  const t = await issueToken(user.id, 'verify', 60 * 48);
+  await sendMail(user.email, 'Confirme seu e-mail', `Olá, ${user.name}! Confirme seu e-mail acessando: ${config.baseUrl}/confirmar-email?t=${t}\nO link vale por 48 horas.`);
 }
 
 const loginLimiter = new Map();
@@ -47,21 +47,21 @@ function signupForm(req, { values = {}, errors = [] } = {}) {
   <p class="center">Já tem conta? <a href="/entrar${org ? '?volta=/organizador/cadastro' : ''}">Entrar</a></p></section>`;
 }
 r.get('/cadastro', (req, res) => (req.user ? res.redirect(req.query.perfil === 'organizador' ? '/organizador/cadastro' : '/minha-conta') : res.page({ title: 'Criar conta', body: signupForm(req) })));
-r.post('/cadastro', (req, res) => {
+r.post('/cadastro', async (req, res) => {
   const b = req.body; const errors = [];
   if (!b.name || b.name.trim().length < 3) errors.push('Informe seu nome completo.');
   if (!isEmail(b.email)) errors.push('Informe um e-mail válido.');
   if (!b.password || b.password.length < 8) errors.push('A senha precisa ter ao menos 8 caracteres.');
   if (!b.accept) errors.push('É necessário aceitar os Termos de Uso e a Política de Privacidade.');
-  if (!errors.length && db.one('SELECT 1 FROM users WHERE email=?', b.email.trim())) errors.push('Já existe conta com este e-mail. Entre com sua senha ou recupere o acesso.');
+  if (!errors.length && await db.one('SELECT 1 FROM users WHERE email=?', b.email.trim())) errors.push('Já existe conta com este e-mail. Entre com sua senha ou recupere o acesso.');
   if (errors.length) return res.status(400).page({ title: 'Criar conta', body: signupForm(req, { values: b, errors }) });
-  const id = Number(db.run('INSERT INTO users(email,name,password_hash,marketing_opt_in) VALUES(?,?,?,?)', b.email.trim().toLowerCase(), b.name.trim(), hashPassword(b.password), b.marketing ? 1 : 0).lastInsertRowid);
-  recordConsent(req, id, 'terms', 'signup'); recordConsent(req, id, 'privacy', 'signup');
-  if (b.marketing) recordConsent(req, id, 'marketing', 'signup');
-  const user = db.one('SELECT * FROM users WHERE id=?', id);
-  sendVerification(user);
-  audit(req, 'user.signup', { userId: id, entity: 'user', entityId: id });
-  startSession(req, res, user, 'athlete');
+  const id = Number((await db.run('INSERT INTO users(email,name,password_hash,marketing_opt_in) VALUES(?,?,?,?)', b.email.trim().toLowerCase(), b.name.trim(), hashPassword(b.password), b.marketing ? 1 : 0)).lastInsertRowid);
+  await recordConsent(req, id, 'terms', 'signup'); await recordConsent(req, id, 'privacy', 'signup');
+  if (b.marketing) await recordConsent(req, id, 'marketing', 'signup');
+  const user = await db.one('SELECT * FROM users WHERE id=?', id);
+  await sendVerification(user);
+  await audit(req, 'user.signup', { userId: id, entity: 'user', entityId: id });
+  await startSession(req, res, user, 'athlete');
   res.flash('success', 'Conta criada! Enviamos um link de confirmação para seu e-mail.');
   res.redirect(303, b.perfil === 'organizador' ? '/organizador/cadastro' : safeBack(b.volta, '/minha-conta'));
 });
@@ -73,68 +73,68 @@ r.get('/entrar', (req, res) => res.page({ title: 'Entrar', body: html`<section c
   ${field('password', 'Senha', { type: 'password', required: true, attrs: 'autocomplete="current-password"' })}
   <button class="btn btn-block">Entrar</button></form>
   <p class="center"><a href="/recuperar-acesso">Esqueci minha senha</a> · <a href="/cadastro${req.query.volta ? `?volta=${encodeURIComponent(req.query.volta)}` : ''}">Criar conta</a></p></section>` }));
-r.post('/entrar', (req, res) => {
+r.post('/entrar', async (req, res) => {
   throttle(`${req.ip}|${String(req.body.email).toLowerCase()}`);
-  const u = db.one('SELECT * FROM users WHERE email=?', String(req.body.email || '').trim());
+  const u = await db.one('SELECT * FROM users WHERE email=?', String(req.body.email || '').trim());
   if (!u || !verifyPassword(req.body.password || '', u.password_hash)) { res.flash('error', 'E-mail ou senha incorretos.'); return res.redirect(303, `/entrar?volta=${encodeURIComponent(req.body.volta || '')}`); }
   if (u.status !== 'active') { res.flash('error', 'Conta suspensa. Entre em contato com o suporte.'); return res.redirect(303, '/entrar'); }
-  startSession(req, res, u);
-  audit(req, 'user.login', { userId: u.id });
+  await startSession(req, res, u);
+  await audit(req, 'user.login', { userId: u.id });
   res.redirect(303, safeBack(req.body.volta, '/minha-conta'));
 });
-r.post('/sair', (req, res) => { if (req.session) db.run('DELETE FROM sessions WHERE id=?', req.session.id); res.clearCookie('sid', { path: '/' }); res.redirect(303, '/'); });
+r.post('/sair', async (req, res) => { if (req.session) await db.run('DELETE FROM sessions WHERE id=?', req.session.id); res.clearCookie('sid', { path: '/' }); res.redirect(303, '/'); });
 
-r.get('/confirmar-email', (req, res) => {
-  const uid = consumeToken(String(req.query.t || ''), 'verify');
+r.get('/confirmar-email', async (req, res) => {
+  const uid = await consumeToken(String(req.query.t || ''), 'verify');
   if (!uid) return res.status(400).page({ title: 'Link inválido', body: html`<section class="card narrow"><h1>Link inválido ou expirado</h1><p>Entre na sua conta e solicite um novo link de confirmação.</p><a class="btn" href="/minha-conta">Ir para minha conta</a></section>` });
-  db.run('UPDATE users SET email_verified_at=COALESCE(email_verified_at,?) WHERE id=?', new Date().toISOString(), uid);
-  for (const m of db.all("SELECT org_id FROM org_members WHERE user_id=? AND role='owner'", uid)) refreshStatus(m.org_id);
-  audit(req, 'user.email_verified', { userId: uid });
+  await db.run('UPDATE users SET email_verified_at=COALESCE(email_verified_at,?) WHERE id=?', new Date().toISOString(), uid);
+  for (const m of await db.all("SELECT org_id FROM org_members WHERE user_id=? AND role='owner'", uid)) await refreshStatus(m.org_id);
+  await audit(req, 'user.email_verified', { userId: uid });
   res.flash('success', 'E-mail confirmado. Obrigado!');
   res.redirect(303, req.user ? (req.session.context.startsWith('org:') ? '/organizador' : '/minha-conta') : '/entrar');
 });
-r.post('/reenviar-confirmacao', requireUser, (req, res) => {
-  if (!req.user.email_verified_at) sendVerification(req.user);
+r.post('/reenviar-confirmacao', requireUser, async (req, res) => {
+  if (!req.user.email_verified_at) await sendVerification(req.user);
   res.flash('success', 'Enviamos um novo link de confirmação.');
   res.back('/minha-conta');
 });
 
 r.get('/recuperar-acesso', (req, res) => res.page({ title: 'Recuperar acesso', body: html`<section class="card narrow"><h1>Recuperar acesso</h1><p>Informe seu e-mail. Se houver conta, enviaremos um link para criar nova senha.</p>
   <form method="post">${csrf(req)}${field('email', 'E-mail', { type: 'email', required: true })}<button class="btn btn-block">Enviar link</button></form></section>` }));
-r.post('/recuperar-acesso', (req, res) => {
+r.post('/recuperar-acesso', async (req, res) => {
   throttle(`reset|${req.ip}`);
-  const u = db.one('SELECT * FROM users WHERE email=?', String(req.body.email || '').trim());
-  if (u) { const t = issueToken(u.id, 'reset', 60); sendMail(u.email, 'Redefinição de senha', `Para criar nova senha acesse ${config.baseUrl}/nova-senha?t=${t} (válido por 1 hora). Se não foi você, ignore esta mensagem.`); }
+  const u = await db.one('SELECT * FROM users WHERE email=?', String(req.body.email || '').trim());
+  if (u) { const t = await issueToken(u.id, 'reset', 60); await sendMail(u.email, 'Redefinição de senha', `Para criar nova senha acesse ${config.baseUrl}/nova-senha?t=${t} (válido por 1 hora). Se não foi você, ignore esta mensagem.`); }
   res.flash('success', 'Se o e-mail estiver cadastrado, você receberá o link em instantes.');
   res.redirect(303, '/entrar');
 });
 r.get('/nova-senha', (req, res) => res.page({ title: 'Nova senha', body: html`<section class="card narrow"><h1>Criar nova senha</h1><form method="post">${csrf(req)}<input type="hidden" name="t" value="${req.query.t || ''}">${field('password', 'Nova senha', { type: 'password', required: true, hint: 'Mínimo de 8 caracteres.' })}<button class="btn btn-block">Salvar</button></form></section>` }));
-r.post('/nova-senha', (req, res) => {
+r.post('/nova-senha', async (req, res) => {
   if (!req.body.password || req.body.password.length < 8) throw new UserError('A senha precisa ter ao menos 8 caracteres.');
-  const uid = consumeToken(String(req.body.t || ''), 'reset');
+  const uid = await consumeToken(String(req.body.t || ''), 'reset');
   if (!uid) throw new UserError('Link inválido ou expirado. Solicite novamente.');
-  db.run('UPDATE users SET password_hash=?, email_verified_at=COALESCE(email_verified_at,?) WHERE id=?', hashPassword(req.body.password), new Date().toISOString(), uid);
-  db.run('DELETE FROM sessions WHERE user_id=?', uid);
-  audit(req, 'user.password_reset', { userId: uid });
+  await db.run('UPDATE users SET password_hash=?, email_verified_at=COALESCE(email_verified_at,?) WHERE id=?', hashPassword(req.body.password), new Date().toISOString(), uid);
+  await db.run('DELETE FROM sessions WHERE user_id=?', uid);
+  await audit(req, 'user.password_reset', { userId: uid });
   res.flash('success', 'Senha alterada. Entre com a nova senha.');
   res.redirect(303, '/entrar');
 });
 
-function switchContext(req, ctx) {
+async function switchContext(req, ctx) {
   if (ctx === 'athlete') return 'athlete';
   if (ctx === 'admin' && req.user.is_admin) return 'admin';
   const m = /^org:(\d+)$/.exec(ctx || '');
-  if (m && membership(req.user.id, Number(m[1]))) return ctx;
+  if (m && await membership(req.user.id, Number(m[1]))) return ctx;
   throw new UserError('Perfil indisponível para esta conta.', 403);
 }
-r.post('/contexto', requireUser, (req, res) => {
-  const ctx = switchContext(req, req.body.context);
-  db.run('UPDATE sessions SET context=? WHERE id=?', ctx, req.session.id);
+r.post('/contexto', requireUser, async (req, res) => {
+  const ctx = await switchContext(req, req.body.context);
+  await db.run('UPDATE sessions SET context=? WHERE id=?', ctx, req.session.id);
   res.redirect(303, ctx === 'admin' ? '/admin' : ctx === 'athlete' ? '/minha-conta' : '/organizador');
 });
-r.get('/contexto/:ctx', requireUser, (req, res) => {
-  const ctx = switchContext(req, req.params.ctx);
-  db.run('UPDATE sessions SET context=? WHERE id=?', ctx, req.session.id);
+r.get('/contexto/:ctx', requireUser, async (req, res) => {
+  const ctx = await switchContext(req, req.params.ctx);
+  await db.run('UPDATE sessions SET context=? WHERE id=?', ctx, req.session.id);
   res.redirect(303, safeBack(req.query.volta, '/'));
 });
 r.post('/privacidade/cookies', (req, res) => { res.setCookie('cookie_consent', req.body.choice === 'all' ? 'all' : 'essential', { maxAge: 180 * 864e5 }); res.back('/'); });
@@ -207,25 +207,25 @@ function takeState(req) {
 }
 
 /** Entra, vincula ou encaminha para a criação de conta. */
-function finishGoogle(req, res, profile, pend) {
+async function finishGoogle(req, res, profile, pend) {
   res.clearCookie('g_state', { path: '/' });
   if (!profile.emailVerified || !isEmail(profile.email || '')) throw new UserError('Sua conta Google não tem e-mail verificado. Use o cadastro com e-mail e senha.');
   const email = profile.email.trim().toLowerCase();
   const dest = pend.perfil === 'organizador' ? '/organizador/cadastro' : safeBack(pend.volta, '/minha-conta');
-  let user = db.one("SELECT u.* FROM user_identities i JOIN users u ON u.id=i.user_id WHERE i.provider='google' AND i.subject=?", profile.sub);
+  let user = await db.one("SELECT u.* FROM user_identities i JOIN users u ON u.id=i.user_id WHERE i.provider='google' AND i.subject=?", profile.sub);
   if (!user) {
-    user = db.one('SELECT * FROM users WHERE email=?', email);
+    user = await db.one('SELECT * FROM users WHERE email=?', email);
     if (user) { // mesmo e-mail, já verificado pelo Google: vincula à conta existente
-      db.run("INSERT INTO user_identities(user_id,provider,subject,email) VALUES(?,'google',?,?)", user.id, profile.sub, email);
-      if (!user.email_verified_at) db.run('UPDATE users SET email_verified_at=? WHERE id=?', new Date().toISOString(), user.id);
-      audit(req, 'user.google_linked', { userId: user.id, entity: 'user', entityId: user.id });
+      await db.run("INSERT INTO user_identities(user_id,provider,subject,email) VALUES(?,'google',?,?)", user.id, profile.sub, email);
+      if (!user.email_verified_at) await db.run('UPDATE users SET email_verified_at=? WHERE id=?', new Date().toISOString(), user.id);
+      await audit(req, 'user.google_linked', { userId: user.id, entity: 'user', entityId: user.id });
     }
   }
   if (user) {
     if (user.status !== 'active') { res.flash('error', 'Conta suspensa. Entre em contato com o suporte.'); return res.redirect(303, '/entrar'); }
-    db.run("UPDATE user_identities SET last_login_at=? WHERE provider='google' AND subject=?", new Date().toISOString(), profile.sub);
-    startSession(req, res, user);
-    audit(req, 'user.login', { userId: user.id, detail: { via: 'google' } });
+    await db.run("UPDATE user_identities SET last_login_at=? WHERE provider='google' AND subject=?", new Date().toISOString(), profile.sub);
+    await startSession(req, res, user);
+    await audit(req, 'user.login', { userId: user.id, detail: { via: 'google' } });
     return res.redirect(303, dest);
   }
   // Conta nova: falta aceitar os termos (consentimento não pode ser presumido)
@@ -239,7 +239,7 @@ r.get('/entrar/google/retorno', async (req, res) => {
   if (config.google.mode !== 'live') throw new UserError('Login com Google indisponível.', 404);
   if (req.query.error) { res.flash('info', 'Login com o Google cancelado.'); return res.redirect(303, '/entrar'); }
   const pend = takeState(req);
-  finishGoogle(req, res, await googleProfile(String(req.query.code || ''), pend), pend);
+  await finishGoogle(req, res, await googleProfile(String(req.query.code || ''), pend), pend);
 });
 
 function googleSignupForm(req, t, p, errors = []) {
@@ -258,7 +258,7 @@ r.get('/cadastro/google', (req, res) => {
   if (!p || p.exp < Date.now()) throw new UserError('Este cadastro expirou. Clique de novo em "Continuar com o Google".');
   res.page({ title: 'Criar conta', body: googleSignupForm(req, req.query.t, p.profile) });
 });
-r.post('/cadastro/google', (req, res) => {
+r.post('/cadastro/google', async (req, res) => {
   const t = String(req.body.t || ''); const p = pendingSignup.get(t);
   if (!p || p.exp < Date.now()) throw new UserError('Este cadastro expirou. Clique de novo em "Continuar com o Google".');
   const name = String(req.body.name || '').trim(); const errors = [];
@@ -266,17 +266,17 @@ r.post('/cadastro/google', (req, res) => {
   if (!req.body.accept) errors.push('É necessário aceitar os Termos de Uso e a Política de Privacidade.');
   if (errors.length) return res.status(400).page({ title: 'Criar conta', body: googleSignupForm(req, t, { ...p.profile, name }, errors) });
   pendingSignup.delete(t);
-  const user = db.tx(() => {
-    const existing = db.one('SELECT * FROM users WHERE email=?', p.profile.email);
-    const id = existing ? existing.id : Number(db.run('INSERT INTO users(email,name,password_hash,email_verified_at,marketing_opt_in) VALUES(?,?,?,?,?)',
-      p.profile.email, name, '!google', new Date().toISOString(), req.body.marketing ? 1 : 0).lastInsertRowid); // sem senha: '!google' nunca confere
-    db.run("INSERT OR IGNORE INTO user_identities(user_id,provider,subject,email,last_login_at) VALUES(?,'google',?,?,?)", id, p.profile.sub, p.profile.email, new Date().toISOString());
-    return db.one('SELECT * FROM users WHERE id=?', id);
+  const user = await db.tx(async () => {
+    const existing = await db.one('SELECT * FROM users WHERE email=?', p.profile.email);
+    const id = existing ? existing.id : Number((await db.run('INSERT INTO users(email,name,password_hash,email_verified_at,marketing_opt_in) VALUES(?,?,?,?,?)',
+      p.profile.email, name, '!google', new Date().toISOString(), req.body.marketing ? 1 : 0)).lastInsertRowid); // sem senha: '!google' nunca confere
+    await db.run("INSERT INTO user_identities(user_id,provider,subject,email,last_login_at) VALUES(?,'google',?,?,?) ON CONFLICT DO NOTHING", id, p.profile.sub, p.profile.email, new Date().toISOString());
+    return await db.one('SELECT * FROM users WHERE id=?', id);
   });
-  recordConsent(req, user.id, 'terms', 'signup_google'); recordConsent(req, user.id, 'privacy', 'signup_google');
-  if (req.body.marketing) recordConsent(req, user.id, 'marketing', 'signup_google');
-  audit(req, 'user.signup', { userId: user.id, entity: 'user', entityId: user.id, detail: { via: 'google' } });
-  startSession(req, res, user, 'athlete');
+  await recordConsent(req, user.id, 'terms', 'signup_google'); await recordConsent(req, user.id, 'privacy', 'signup_google');
+  if (req.body.marketing) await recordConsent(req, user.id, 'marketing', 'signup_google');
+  await audit(req, 'user.signup', { userId: user.id, entity: 'user', entityId: user.id, detail: { via: 'google' } });
+  await startSession(req, res, user, 'athlete');
   res.flash('success', 'Conta criada com o Google!');
   res.redirect(303, p.perfil === 'organizador' ? '/organizador/cadastro' : safeBack(p.volta, '/minha-conta'));
 });
@@ -290,11 +290,11 @@ r.get('/dev/google', (req, res) => {
   ${field('email', 'E-mail da conta Google', { type: 'email', required: true })}${field('name', 'Nome', { required: true })}
   <button class="btn btn-block">Continuar</button></form></section>` });
 });
-r.post('/dev/google', (req, res) => {
+r.post('/dev/google', async (req, res) => {
   if (config.google.mode !== 'simulator') throw new UserError('Simulador desativado.', 404);
   const pend = takeState(req);
   const email = String(req.body.email || '').trim().toLowerCase();
-  finishGoogle(req, res, { sub: `sim-${email}`, email, name: String(req.body.name || '').trim(), emailVerified: true }, pend);
+  await finishGoogle(req, res, { sub: `sim-${email}`, email, name: String(req.body.name || '').trim(), emailVerified: true }, pend);
 });
 
 module.exports = r;

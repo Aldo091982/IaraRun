@@ -19,15 +19,15 @@ function verifyPassword(pw, stored) {
 }
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 
-function issueToken(userId, type, minutes) {
+async function issueToken(userId, type, minutes) {
   const t = randomToken(32);
-  db.run('INSERT INTO tokens(token_hash,user_id,type,expires_at) VALUES(?,?,?,?)', sha256(t), userId, type, new Date(Date.now() + minutes * 60000).toISOString());
+  await db.run('INSERT INTO tokens(token_hash,user_id,type,expires_at) VALUES(?,?,?,?)', sha256(t), userId, type, new Date(Date.now() + minutes * 60000).toISOString());
   return t;
 }
-function consumeToken(t, type) {
-  const row = db.one('SELECT * FROM tokens WHERE token_hash=? AND type=?', sha256(t), type);
+async function consumeToken(t, type) {
+  const row = await db.one('SELECT * FROM tokens WHERE token_hash=? AND type=?', sha256(t), type);
   if (!row || row.used_at || row.expires_at < new Date().toISOString()) return null;
-  db.run('UPDATE tokens SET used_at=? WHERE token_hash=?', new Date().toISOString(), row.token_hash);
+  await db.run('UPDATE tokens SET used_at=? WHERE token_hash=?', new Date().toISOString(), row.token_hash);
   return row.user_id;
 }
 
@@ -36,23 +36,23 @@ function consumeToken(t, type) {
  * visível em /dev/caixa-de-saida fora de produção. Envio SMTP real: configuração externa pendente.
  * category 'marketing' respeita o consentimento; transacionais sempre são registradas.
  */
-function sendMail(to, subject, body, category = 'transactional') {
+async function sendMail(to, subject, body, category = 'transactional') {
   if (category === 'marketing') {
-    const u = db.one('SELECT marketing_opt_in FROM users WHERE email=?', to);
+    const u = await db.one('SELECT marketing_opt_in FROM users WHERE email=?', to);
     if (!u || !u.marketing_opt_in) return false;
   }
   if (category !== 'transactional' && category !== 'marketing') {
-    const u = db.one('SELECT notify_prefs FROM users WHERE email=?', to);
+    const u = await db.one('SELECT notify_prefs FROM users WHERE email=?', to);
     const prefs = json(u?.notify_prefs, {});
     if (prefs[category] === false) return false;
   }
-  db.run('INSERT INTO outbox(to_email,subject,body,category) VALUES(?,?,?,?)', to, subject, body, category);
+  await db.run('INSERT INTO outbox(to_email,subject,body,category) VALUES(?,?,?,?)', to, subject, body, category);
   if (!config.isTest) console.log(`[e-mail:${category}] para=${to} assunto="${subject}"`);
   return true;
 }
 
-function audit(req, action, { entity, entityId, orgId, detail, userId } = {}) {
-  db.run('INSERT INTO audit_log(user_id,org_id,action,entity,entity_id,detail,ip) VALUES(?,?,?,?,?,?,?)',
+async function audit(req, action, { entity, entityId, orgId, detail, userId } = {}) {
+  await db.run('INSERT INTO audit_log(user_id,org_id,action,entity,entity_id,detail,ip) VALUES(?,?,?,?,?,?,?)',
     userId ?? req?.user?.id ?? null, orgId ?? null, action, entity ?? null, entityId != null ? String(entityId) : null,
     detail ? JSON.stringify(detail) : null, req?.ip ?? null);
 }
@@ -63,12 +63,12 @@ const LEGAL = {
   privacy: { title: 'Política de Privacidade', version: '2026-11-01' },
   organizer: { title: 'Termos do Organizador', version: '2026-11-01' },
 };
-function recordConsent(req, userId, key, context) {
+async function recordConsent(req, userId, key, context) {
   const doc = LEGAL[key];
-  db.run('INSERT INTO consents(user_id,doc_key,version,context,ip) VALUES(?,?,?,?,?)', userId, key, doc ? doc.version : String(context), context || null, req?.ip ?? null);
+  await db.run('INSERT INTO consents(user_id,doc_key,version,context,ip) VALUES(?,?,?,?,?)', userId, key, doc ? doc.version : String(context), context || null, req?.ip ?? null);
 }
-function hasConsent(userId, key) {
-  return !!db.one('SELECT 1 FROM consents WHERE user_id=? AND doc_key=? AND version=?', userId, key, LEGAL[key].version);
+async function hasConsent(userId, key) {
+  return !!await db.one('SELECT 1 FROM consents WHERE user_id=? AND doc_key=? AND version=?', userId, key, LEGAL[key].version);
 }
 
 const DEFAULT_SETTINGS = {
@@ -80,6 +80,6 @@ const DEFAULT_SETTINGS = {
   free_events_fee_percent: 0,
   commercial_conditions: 'Condições comerciais a definir pela administração da plataforma.',
 };
-function settings() { const out = {}; for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) out[k] = db.setting(k, v); return out; }
+async function settings() { const out = {}; for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) out[k] = await db.setting(k, v); return out; }
 
 module.exports = { hashPassword, verifyPassword, sha256, issueToken, consumeToken, sendMail, audit, LEGAL, recordConsent, hasConsent, settings, DEFAULT_SETTINGS };

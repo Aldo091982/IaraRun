@@ -14,7 +14,14 @@ const config = {
   isTest: env === 'test',
   port: Number(process.env.PORT || 3000),
   baseUrl: (process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, ''),
-  dbFile: process.env.DB_FILE || path.join(root, 'storage', `${env}.sqlite`),
+  db: {
+    // postgres://usuario:senha@host:5432/banco — padrão: PostgreSQL local de desenvolvimento (npm run db:start)
+    url: process.env.DATABASE_URL || `postgres://postgres:postgres@127.0.0.1:54329/plataforma_${env}`,
+    ssl: process.env.DATABASE_SSL === '1',
+    // Cria o banco se não existir (padrão fora de produção; em produção o banco é criado antes)
+    createDatabase: process.env.DB_CREATE ? process.env.DB_CREATE === '1' : env !== 'production',
+    poolSize: Number(process.env.DB_POOL_SIZE || 10),
+  },
   privateDir: process.env.PRIVATE_STORAGE_DIR || path.join(root, 'storage', 'private', env),
   publicUploadDir: process.env.PUBLIC_UPLOAD_DIR || path.join(root, 'storage', 'public', env),
   sessionSecret: process.env.SESSION_SECRET || (env === 'production' ? null : 'dev-only-secret-change-me'),
@@ -53,6 +60,7 @@ const config = {
   analytics: { ga: process.env.GA_MEASUREMENT_ID || '', metaPixel: process.env.META_PIXEL_ID || '' },
 };
 if (!config.sessionSecret) throw new Error('SESSION_SECRET é obrigatório em produção');
+if (config.isProd && !process.env.DATABASE_URL) throw new Error('DATABASE_URL é obrigatório em produção');
 
 // Modo efetivo de pagamento:
 //  simulator          -> sem credenciais, fora de produção (DEMONSTRAÇÃO)

@@ -72,14 +72,14 @@ const providers = {
     name: 'simulator',
     async createCheckout(order, ev, meio = 'mercadopago') { return { ref: `sim-${meio}-${order.code}`, url: `/dev/pagamento-simulado/${order.code}?meio=${meio}` }; },
     async getPayment(id) {
-      const p = db.one('SELECT * FROM sim_payments WHERE id=?', id);
+      const p = await db.one('SELECT * FROM sim_payments WHERE id=?', id);
       if (!p) return null;
       return { id: p.id, status: p.status, amount_cents: p.amount_cents, currency: p.currency, external_reference: p.order_code, method: p.method, refunded_cents: p.refunded_cents, updated_at: p.updated_at, collector_ok: true };
     },
     async refund(id, cents) {
-      const p = db.one('SELECT * FROM sim_payments WHERE id=?', id);
+      const p = await db.one('SELECT * FROM sim_payments WHERE id=?', id);
       const refunded = Math.min(p.amount_cents, p.refunded_cents + cents);
-      db.run('UPDATE sim_payments SET refunded_cents=?, status=?, updated_at=? WHERE id=?', refunded, refunded >= p.amount_cents ? 'refunded' : p.status, nowIso(), id);
+      await db.run('UPDATE sim_payments SET refunded_cents=?, status=?, updated_at=? WHERE id=?', refunded, refunded >= p.amount_cents ? 'refunded' : p.status, nowIso(), id);
       return { id: 'sim-refund-' + code('R'), amount_cents: cents };
     },
   },
@@ -171,8 +171,8 @@ const providers = {
   picpay: {
     name: 'picpay',
     async createCheckout(order) {
-      const u = db.one('SELECT name, email, phone, cpf FROM users WHERE id=?', order.user_id);
-      const g = db.one('SELECT name, cpf FROM registrations WHERE order_id=? ORDER BY id LIMIT 1', order.id) || {};
+      const u = await db.one('SELECT name, email, phone, cpf FROM users WHERE id=?', order.user_id);
+      const g = await db.one('SELECT name, cpf FROM registrations WHERE order_id=? ORDER BY id LIMIT 1', order.id) || {};
       const name = String(u.name || g.name || '').trim().split(/\s+/);
       const cpf = String(u.cpf || g.cpf || '').replace(/\D/g, '');
       const r = await picFetch('/payments', { method: 'POST', body: {
@@ -184,7 +184,7 @@ const providers = {
     },
     async getPayment(ref) {
       const r = await picFetch(`/payments/${encodeURIComponent(ref)}/status`);
-      const order = db.one('SELECT total_cents FROM orders WHERE code=?', ref);
+      const order = await db.one('SELECT total_cents FROM orders WHERE code=?', ref);
       const st = { created: 'pending', analysis: 'pending', paid: 'approved', completed: 'approved', expired: 'expired', refunded: 'refunded', chargeback: 'refunded' }[r.status] || 'pending';
       // A consulta de status do PicPay não devolve o valor: vale o valor enviado na criação (referenceId = código do pedido).
       return { id: String(r.referenceId || ref), status: st, amount_cents: order?.total_cents, currency: 'BRL', external_reference: r.referenceId || ref,
@@ -236,7 +236,7 @@ function availableMethods() {
 const anySimulator = () => availableMethods().some((m) => m.mode === 'simulator');
 
 async function startCheckout(order, meio) {
-  const ev = db.one('SELECT * FROM events WHERE id=?', order.event_id);
+  const ev = await db.one('SELECT * FROM events WHERE id=?', order.event_id);
   const avail = availableMethods();
   const m = avail.find((x) => x.key === meio) || (!meio ? avail[0] : null);
   if (!m) throw new UserError('Meio de pagamento indisponível neste ambiente.', 503);
@@ -245,8 +245,8 @@ async function startCheckout(order, meio) {
   if (order.checkout_url && sameMethod) return order.checkout_url; // reaproveita o checkout já criado
   // Troca de meio: se o atleta pagar pelos dois, o segundo aprovado vira exceção para reembolso (processPayment).
   const r = await prov.createCheckout(order, ev, m.key);
-  db.run('UPDATE orders SET provider=?, provider_ref=?, checkout_url=?, updated_at=? WHERE id=?', prov.name, r.ref, r.url, nowIso(), order.id);
-  audit(null, 'payment.checkout', { entity: 'order', entityId: order.id, detail: { method: m.key, mode: m.mode } });
+  await db.run('UPDATE orders SET provider=?, provider_ref=?, checkout_url=?, updated_at=? WHERE id=?', prov.name, r.ref, r.url, nowIso(), order.id);
+  await audit(null, 'payment.checkout', { entity: 'order', entityId: order.id, detail: { method: m.key, mode: m.mode } });
   return r.url;
 }
 
@@ -274,44 +274,44 @@ async function processPayment(provName, paymentId) {
   const prov = providers[provName];
   const p = await prov.getPayment(paymentId);
   if (!p) return { ok: false, reason: 'payment_not_found' };
-  const order = db.one('SELECT * FROM orders WHERE code=?', p.external_reference || '');
+  const order = await db.one('SELECT * FROM orders WHERE code=?', p.external_reference || '');
   if (!order) return { ok: false, reason: 'order_not_found' };
   const status = STATUS_MAP[p.status] || 'pending';
 
-  return db.tx(() => {
-    const prev = db.one('SELECT * FROM payments WHERE provider=? AND provider_payment_id=?', provName, p.id);
+  return await db.tx(async () => {
+    const prev = await db.one('SELECT * FROM payments WHERE provider=? AND provider_payment_id=?', provName, p.id);
     // Fora de ordem: ignora estado mais antigo do que o já registrado
     if (prev && prev.provider_updated_at && p.updated_at && p.updated_at < prev.provider_updated_at) return { ok: true, ignored: 'stale' };
-    if (prev) db.run('UPDATE payments SET status=?, method=?, amount_cents=?, currency=?, refunded_cents=?, provider_updated_at=?, updated_at=? WHERE id=?', status, p.method, p.amount_cents, p.currency, p.refunded_cents || 0, p.updated_at, nowIso(), prev.id);
-    else db.run('INSERT INTO payments(order_id,provider,provider_payment_id,status,method,amount_cents,currency,refunded_cents,provider_updated_at) VALUES(?,?,?,?,?,?,?,?,?)', order.id, provName, p.id, status, p.method, p.amount_cents, p.currency, p.refunded_cents || 0, p.updated_at);
+    if (prev) await db.run('UPDATE payments SET status=?, method=?, amount_cents=?, currency=?, refunded_cents=?, provider_updated_at=?, updated_at=? WHERE id=?', status, p.method, p.amount_cents, p.currency, p.refunded_cents || 0, p.updated_at, nowIso(), prev.id);
+    else await db.run('INSERT INTO payments(order_id,provider,provider_payment_id,status,method,amount_cents,currency,refunded_cents,provider_updated_at) VALUES(?,?,?,?,?,?,?,?,?)', order.id, provName, p.id, status, p.method, p.amount_cents, p.currency, p.refunded_cents || 0, p.updated_at);
 
     if (status === 'approved') {
       const mismatch = [];
       if (p.amount_cents !== order.total_cents) mismatch.push(`valor ${p.amount_cents} ≠ ${order.total_cents}`);
       if (p.currency !== 'BRL') mismatch.push(`moeda ${p.currency}`);
       if (!p.collector_ok) mismatch.push('beneficiário divergente');
-      const otherApproved = db.one("SELECT 1 FROM payments WHERE order_id=? AND status='approved' AND provider_payment_id<>?", order.id, p.id);
+      const otherApproved = await db.one("SELECT 1 FROM payments WHERE order_id=? AND status='approved' AND provider_payment_id<>?", order.id, p.id);
       if (otherApproved && ['paid', 'free'].includes(order.status)) mismatch.push('pagamento duplicado para pedido já pago');
       if (mismatch.length) {
         const note = 'Pagamento aprovado com divergência: ' + mismatch.join('; ');
-        if (!['paid', 'free'].includes(order.status)) db.run("UPDATE orders SET status='exception', exception_note=? WHERE id=?", note, order.id);
-        db.run('INSERT INTO payment_exceptions(order_id,reason) VALUES(?,?)', order.id, note);
-        audit(null, 'payment.mismatch', { entity: 'order', entityId: order.id, detail: { mismatch } });
+        if (!['paid', 'free'].includes(order.status)) await db.run("UPDATE orders SET status='exception', exception_note=? WHERE id=?", note, order.id);
+        await db.run('INSERT INTO payment_exceptions(order_id,reason) VALUES(?,?)', order.id, note);
+        await audit(null, 'payment.mismatch', { entity: 'order', entityId: order.id, detail: { mismatch } });
         return { ok: false, reason: 'mismatch' };
       }
-      return confirmOrder(order.id);
+      return await confirmOrder(order.id);
     }
     if (status === 'refunded' && ['paid', 'partially_refunded'].includes(order.status)) {
       const full = (p.refunded_cents || p.amount_cents) >= order.total_cents;
       if (full) {
-        db.run("UPDATE orders SET status='refunded', updated_at=? WHERE id=?", nowIso(), order.id);
-        for (const g of db.all("SELECT id FROM registrations WHERE order_id=? AND status='confirmed'", order.id)) cancelRegistration(g.id, 'refunded');
+        await db.run("UPDATE orders SET status='refunded', updated_at=? WHERE id=?", nowIso(), order.id);
+        for (const g of await db.all("SELECT id FROM registrations WHERE order_id=? AND status='confirmed'", order.id)) await cancelRegistration(g.id, 'refunded');
       }
       return { ok: true, refunded: true };
     }
     if (status === 'pending' && order.status === 'pending') {
-      const u = db.one('SELECT email FROM users WHERE id=?', order.user_id);
-      if (!prev) sendMail(u.email, `Pagamento pendente — pedido ${order.code}`, 'Recebemos seu pagamento e ele está em análise. A inscrição será confirmada assim que o pagamento for aprovado.', 'payments');
+      const u = await db.one('SELECT email FROM users WHERE id=?', order.user_id);
+      if (!prev) await sendMail(u.email, `Pagamento pendente — pedido ${order.code}`, 'Recebemos seu pagamento e ele está em análise. A inscrição será confirmada assim que o pagamento for aprovado.', 'payments');
     }
     return { ok: true, status };
   });
@@ -319,7 +319,7 @@ async function processPayment(provName, paymentId) {
 
 /** Reembolso (total ou parcial) solicitado por quem tem permissão. */
 async function refund(order, cents, req) {
-  const pay = db.one("SELECT * FROM payments WHERE order_id=? AND status='approved' ORDER BY id DESC LIMIT 1", order.id);
+  const pay = await db.one("SELECT * FROM payments WHERE order_id=? AND status='approved' ORDER BY id DESC LIMIT 1", order.id);
   if (!pay) {
     if (order.status === 'free') return { ok: true, free: true };
     throw new UserError('Não há pagamento aprovado para reembolsar.');
@@ -328,18 +328,18 @@ async function refund(order, cents, req) {
   const amount = Math.min(cents, (pay.amount_cents || 0) - (pay.refunded_cents || 0));
   if (amount <= 0) throw new UserError('Valor já reembolsado.');
   const r = await prov.refund(pay.provider_payment_id, amount, `refund-${order.code}-${pay.refunded_cents + amount}`, pay);
-  db.run('UPDATE payments SET refunded_cents=refunded_cents+?, status=CASE WHEN refunded_cents+?>=amount_cents THEN ? ELSE status END, updated_at=? WHERE id=?', amount, amount, 'refunded', nowIso(), pay.id);
-  const after = db.one('SELECT * FROM payments WHERE id=?', pay.id);
-  db.run('UPDATE orders SET status=?, updated_at=? WHERE id=?', after.refunded_cents >= order.total_cents ? 'refunded' : 'partially_refunded', nowIso(), order.id);
-  audit(req, 'payment.refund', { entity: 'order', entityId: order.id, orgId: req?.org?.id, detail: { amount, refund_id: r.id } });
+  await db.run('UPDATE payments SET refunded_cents=refunded_cents+?, status=CASE WHEN refunded_cents+?>=amount_cents THEN ? ELSE status END, updated_at=? WHERE id=?', amount, amount, 'refunded', nowIso(), pay.id);
+  const after = await db.one('SELECT * FROM payments WHERE id=?', pay.id);
+  await db.run('UPDATE orders SET status=?, updated_at=? WHERE id=?', after.refunded_cents >= order.total_cents ? 'refunded' : 'partially_refunded', nowIso(), order.id);
+  await audit(req, 'payment.refund', { entity: 'order', entityId: order.id, orgId: req?.org?.id, detail: { amount, refund_id: r.id } });
   return { ok: true, amount };
 }
 
 /** Conciliação: compara pedidos com transações registradas. */
-function reconciliation(eventIds) {
+async function reconciliation(eventIds) {
   if (!eventIds.length) return [];
   const ph = eventIds.map(() => '?').join(',');
-  return db.all(`SELECT o.code, o.status order_status, o.total_cents, p.provider, p.provider_payment_id, p.status pay_status, p.amount_cents, p.refunded_cents, p.method,
+  return await db.all(`SELECT o.code, o.status order_status, o.total_cents, p.provider, p.provider_payment_id, p.status pay_status, p.amount_cents, p.refunded_cents, p.method,
       CASE WHEN o.status IN ('paid','partially_refunded') AND (p.status IS NULL OR p.status<>'approved') AND p.refunded_cents=0 THEN 'Pedido pago sem pagamento aprovado'
            WHEN p.status='approved' AND o.status NOT IN ('paid','partially_refunded') THEN 'Pagamento aprovado sem pedido confirmado'
            WHEN p.status='approved' AND p.amount_cents<>o.total_cents THEN 'Valor divergente'

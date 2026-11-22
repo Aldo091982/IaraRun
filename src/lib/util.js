@@ -90,6 +90,10 @@ const randomToken = (bytes = 24) => crypto.randomBytes(bytes).toString('base64ur
 const code = (prefix = 'P') => prefix + crypto.randomBytes(5).toString('hex').toUpperCase();
 const nowIso = () => new Date().toISOString();
 const addMinutes = (min, from = new Date()) => new Date(from.getTime() + min * 60000).toISOString();
+/** Equivalentes assíncronos de some/every/filter (avaliação em sequência). */
+async function someAsync(arr, fn) { for (const [i, x] of arr.entries()) if (await fn(x, i)) return true; return false; }
+async function everyAsync(arr, fn) { for (const [i, x] of arr.entries()) if (!(await fn(x, i))) return false; return true; }
+async function filterAsync(arr, fn) { const out = []; for (const [i, x] of arr.entries()) if (await fn(x, i)) out.push(x); return out; }
 const json = (s, fb = {}) => { try { return s ? JSON.parse(s) : fb; } catch { return fb; } };
 const maskCpf = (c) => (c ? `***.${String(c).replace(/\D/g, '').slice(3, 6)}.***-**` : '—');
 const maskEmail = (e) => (e ? e.replace(/^(.).*(@.*)$/, '$1***$2') : '—');
@@ -122,4 +126,4 @@ function parseCsv(text) {
   return rows.filter((r) => r.some((c) => c.trim() !== ''));
 }
 
-module.exports = { esc, html, raw, Raw, brl, toCents, centsToInput, zonedToUtc, utcToZonedInput, fmtDateTime, fmtDate, fmtDateShort, fmtTime, tzLabel, TIMEZONES, UF, ageAt, fmtDuration, fmtPace, parseDuration, slugify, randomToken, code, nowIso, addMinutes, json, maskCpf, maskEmail, UserError, Forbidden, NotFound, toCsv, parseCsv };
+module.exports = { someAsync, everyAsync, filterAsync, esc, html, raw, Raw, brl, toCents, centsToInput, zonedToUtc, utcToZonedInput, fmtDateTime, fmtDate, fmtDateShort, fmtTime, tzLabel, TIMEZONES, UF, ageAt, fmtDuration, fmtPace, parseDuration, slugify, randomToken, code, nowIso, addMinutes, json, maskCpf, maskEmail, UserError, Forbidden, NotFound, toCsv, parseCsv };

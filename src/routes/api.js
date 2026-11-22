@@ -22,9 +22,9 @@ r.get('/docs', (req, res) => res.page({ title: 'API', body: html`<article class=
 <h2>Privacidade</h2><p>Documentos privados e dados de pagamento nunca são expostos pela API.</p>
 <h2>Próximas etapas</h2><p>Webhooks de saída assinados (HMAC-SHA256) para inscrição, pagamento, kit e resultados, com repetição controlada e idempotência; endpoint de envio de tempos para cronometragem.</p></article>` }));
 
-r.use('/v1', (req, res, next) => {
+r.use('/v1', async (req, res, next) => {
   const m = /^Bearer\s+(\S+)$/.exec(req.headers.authorization || '');
-  const org = m && db.one('SELECT * FROM organizations WHERE api_key_hash=?', sha256(m[1]));
+  const org = m && await db.one('SELECT * FROM organizations WHERE api_key_hash=?', sha256(m[1]));
   if (!org) return res.status(401).json({ error: 'Chave de API inválida.' });
   if (org.status === 'suspended') return res.status(403).json({ error: 'Organização suspensa.' });
   const now = Date.now(); const h = hits.get(org.id) || { n: 0, t: now };
@@ -32,30 +32,30 @@ r.use('/v1', (req, res, next) => {
   if (++h.n > 60) { hits.set(org.id, h); return res.status(429).json({ error: 'Limite de requisições excedido.' }); }
   hits.set(org.id, h);
   req.apiOrg = org;
-  audit(req, 'api.request', { orgId: org.id, detail: { path: req.originalUrl.slice(0, 200) } });
+  await audit(req, 'api.request', { orgId: org.id, detail: { path: req.originalUrl.slice(0, 200) } });
   next();
 });
 const page = (req) => { const per = Math.min(100, Math.max(1, Number(req.query.per_page) || 50)); const p = Math.max(1, Number(req.query.page) || 1); return { per, p, off: (p - 1) * per }; };
-const orgEvent = (req) => db.one('SELECT * FROM events WHERE id=? AND org_id=?', Number(req.params.id), req.apiOrg.id);
+const orgEvent = async (req) => await db.one('SELECT * FROM events WHERE id=? AND org_id=?', Number(req.params.id), req.apiOrg.id);
 
-r.get('/v1/events', (req, res) => {
+r.get('/v1/events', async (req, res) => {
   const { per, p, off } = page(req);
-  const total = db.one('SELECT COUNT(*) n FROM events WHERE org_id=?', req.apiOrg.id).n;
-  const data = db.all('SELECT id, slug, name, status, start_utc, timezone, city, state FROM events WHERE org_id=? ORDER BY id DESC LIMIT ? OFFSET ?', req.apiOrg.id, per, off);
+  const total = (await db.one('SELECT COUNT(*) n FROM events WHERE org_id=?', req.apiOrg.id)).n;
+  const data = await db.all('SELECT id, slug, name, status, start_utc, timezone, city, state FROM events WHERE org_id=? ORDER BY id DESC LIMIT ? OFFSET ?', req.apiOrg.id, per, off);
   res.json({ data, page: p, per_page: per, total });
 });
-r.get('/v1/events/:id/registrations', (req, res) => {
-  const ev = orgEvent(req); if (!ev) return res.status(404).json({ error: 'Evento não encontrado.' });
+r.get('/v1/events/:id/registrations', async (req, res) => {
+  const ev = await orgEvent(req); if (!ev) return res.status(404).json({ error: 'Evento não encontrado.' });
   const { per, p, off } = page(req);
   const st = req.query.status ? String(req.query.status) : null;
-  const total = db.one(`SELECT COUNT(*) n FROM registrations WHERE event_id=? ${st ? 'AND status=?' : ''}`, ev.id, ...(st ? [st] : [])).n;
-  const rows = db.all(`SELECT g.id, g.bib, g.name, g.cpf, g.gender, g.status, g.kit_size, m.name modality, c.name category, g.confirmed_at FROM registrations g JOIN modalities m ON m.id=g.modality_id LEFT JOIN categories c ON c.id=g.category_id WHERE g.event_id=? ${st ? 'AND g.status=?' : ''} ORDER BY g.id LIMIT ? OFFSET ?`, ev.id, ...(st ? [st] : []), per, off);
+  const total = (await db.one(`SELECT COUNT(*) n FROM registrations WHERE event_id=? ${st ? 'AND status=?' : ''}`, ev.id, ...(st ? [st] : []))).n;
+  const rows = await db.all(`SELECT g.id, g.bib, g.name, g.cpf, g.gender, g.status, g.kit_size, m.name modality, c.name category, g.confirmed_at FROM registrations g JOIN modalities m ON m.id=g.modality_id LEFT JOIN categories c ON c.id=g.category_id WHERE g.event_id=? ${st ? 'AND g.status=?' : ''} ORDER BY g.id LIMIT ? OFFSET ?`, ev.id, ...(st ? [st] : []), per, off);
   res.json({ data: rows.map((x) => ({ ...x, cpf: maskCpf(x.cpf) })), page: p, per_page: per, total });
 });
-r.get('/v1/events/:id/results', (req, res) => {
-  const ev = orgEvent(req); if (!ev) return res.status(404).json({ error: 'Evento não encontrado.' });
-  const v = currentPublished(ev.id);
+r.get('/v1/events/:id/results', async (req, res) => {
+  const ev = await orgEvent(req); if (!ev) return res.status(404).json({ error: 'Evento não encontrado.' });
+  const v = await currentPublished(ev.id);
   if (!v) return res.json({ data: [], version: null });
-  res.json({ version: v.version, status: v.status, data: versionRows(v.id).map((x) => ({ bib: x.bib, name: x.name, modality: x.modality_name, category: x.category_name, gun_s: x.gun_s, net_s: x.net_s, status: x.status, rank_overall: x.rank_overall, rank_category: x.rank_category })) });
+  res.json({ version: v.version, status: v.status, data: (await versionRows(v.id)).map((x) => ({ bib: x.bib, name: x.name, modality: x.modality_name, category: x.category_name, gun_s: x.gun_s, net_s: x.net_s, status: x.status, rank_overall: x.rank_overall, rank_category: x.rank_category })) });
 });
 module.exports = r;

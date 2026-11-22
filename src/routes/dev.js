@@ -10,17 +10,17 @@ const { csrf, table, badge } = require('../views/layout');
 
 const r = express.Router();
 
-r.get('/caixa-de-saida', (req, res) => {
-  const mails = db.all('SELECT * FROM outbox ORDER BY id DESC LIMIT 100');
+r.get('/caixa-de-saida', async (req, res) => {
+  const mails = await db.all('SELECT * FROM outbox ORDER BY id DESC LIMIT 100');
   res.page({ title: 'Caixa de saída (desenvolvimento)', wide: true, body: html`<h1>Caixa de saída local</h1><div class="alert alert-info">Ambiente de desenvolvimento: os e-mails não são enviados; ficam registrados aqui. Configure um provedor de e-mail para produção.</div>
   ${mails.map((m) => html`<article class="card mail"><p class="muted">${fmtDateTime(m.created_at)} · ${badge(m.category, 'muted')} · para <strong>${m.to_email}</strong></p><h3>${m.subject}</h3><pre class="mail-body">${m.body}</pre></article>`)}` });
 });
 
-r.get('/pagamento-simulado/:code', (req, res) => {
+r.get('/pagamento-simulado/:code', async (req, res) => {
   if (!payments.anySimulator()) throw new UserError('Simulador desativado: os meios de pagamento têm credenciais configuradas.', 404);
-  const o = db.one('SELECT * FROM orders WHERE code=?', req.params.code);
+  const o = await db.one('SELECT * FROM orders WHERE code=?', req.params.code);
   if (!o) throw new UserError('Pedido não encontrado.', 404);
-  const sims = db.all('SELECT * FROM sim_payments WHERE order_code=?', o.code);
+  const sims = await db.all('SELECT * FROM sim_payments WHERE order_code=?', o.code);
   const meio = payments.METHODS[req.query.meio] ? String(req.query.meio) : 'mercadopago';
   res.page({ title: 'Pagamento simulado', body: html`<section class="card narrow sim"><p>${badge('DEMONSTRAÇÃO — nenhum valor real', 'warn')}</p><h1>Checkout simulado · ${payments.METHODS[meio].label}</h1>
   <p>Pedido <strong>${o.code}</strong> · ${brl(o.total_cents)}</p><p class="muted">Este simulador substitui o ${payments.METHODS[meio].label} quando não há credenciais. Ele cria uma transação local e envia um webhook assinado; o servidor consulta o estado e valida valor, moeda e pedido antes de confirmar — o mesmo fluxo do provedor real.</p>
@@ -38,21 +38,21 @@ r.get('/pagamento-simulado/:code', (req, res) => {
 });
 
 async function simulate(orderCode, status, method, { amount } = {}) {
-  const o = db.one('SELECT * FROM orders WHERE code=?', orderCode);
+  const o = await db.one('SELECT * FROM orders WHERE code=?', orderCode);
   const id = `SIM${code('').slice(1)}`;
-  db.run('INSERT INTO sim_payments(id,order_code,status,amount_cents,method,updated_at) VALUES(?,?,?,?,?,?)', id, o.code, status, amount ?? o.total_cents, method, nowIso());
-  return sendSimWebhook(id);
+  await db.run('INSERT INTO sim_payments(id,order_code,status,amount_cents,method,updated_at) VALUES(?,?,?,?,?,?)', id, o.code, status, amount ?? o.total_cents, method, nowIso());
+  return await sendSimWebhook(id);
 }
 async function sendSimWebhook(paymentId, requestId = code('REQ')) {
-  return handleNotification({ provider: 'simulator', secret: payments.SIM_SECRET, headers: { 'x-request-id': requestId, 'x-signature': payments.signForSim(paymentId, requestId) }, query: { 'data.id': paymentId, type: 'payment' }, body: { action: 'payment.updated', type: 'payment', data: { id: paymentId } } });
+  return await handleNotification({ provider: 'simulator', secret: payments.SIM_SECRET, headers: { 'x-request-id': requestId, 'x-signature': payments.signForSim(paymentId, requestId) }, query: { 'data.id': paymentId, type: 'payment' }, body: { action: 'payment.updated', type: 'payment', data: { id: paymentId } } });
 }
 r.post('/pagamento-simulado/:code', async (req, res) => {
   if (!payments.anySimulator()) throw new UserError('Simulador desativado.', 404);
-  const o = db.one('SELECT * FROM orders WHERE code=?', req.params.code);
+  const o = await db.one('SELECT * FROM orders WHERE code=?', req.params.code);
   if (!o) throw new UserError('Pedido não encontrado.', 404);
   if (req.body.acao === 'replay') {
-    const last = db.one('SELECT * FROM sim_payments WHERE order_code=? ORDER BY rowid DESC LIMIT 1', o.code);
-    const ev = db.one("SELECT dedupe_key FROM webhook_events WHERE resource_id=? AND signature_ok=1 ORDER BY id DESC LIMIT 1", last.id);
+    const last = await db.one('SELECT * FROM sim_payments WHERE order_code=? ORDER BY updated_at DESC, id DESC LIMIT 1', o.code);
+    const ev = await db.one("SELECT dedupe_key FROM webhook_events WHERE resource_id=? AND signature_ok=1 ORDER BY id DESC LIMIT 1", last.id);
     const out = await sendSimWebhook(last.id, ev ? ev.dedupe_key.split(':')[1] : undefined);
     res.flash('info', `Webhook reenviado: ${typeof out.result === 'string' ? out.result : 'processado'}.`);
     return res.redirect(303, `/dev/pagamento-simulado/${o.code}?meio=${encodeURIComponent(req.body.meio || 'mercadopago')}`);

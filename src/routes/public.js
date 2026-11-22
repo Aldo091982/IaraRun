@@ -2,7 +2,7 @@
 const express = require('express');
 const db = require('../db');
 const config = require('../config');
-const { html, raw, brl, fmtDate, fmtDateTime, fmtTime, tzLabel, UF, NotFound, fmtDuration, fmtPace, json } = require('../lib/util');
+const { html, raw, brl, fmtDate, fmtDateTime, fmtTime, tzLabel, UF, NotFound, fmtDuration, fmtPace, json, someAsync, filterAsync } = require('../lib/util');
 const { publicStatus, PUBLIC_STATUS, currentLot, counts } = require('../lib/events');
 const { currentPublished, versionRows, RESULT_STATUS } = require('../lib/results');
 const { settings } = require('../lib/core');
@@ -11,11 +11,11 @@ const { requireUser } = require('../lib/guards');
 const { art, sportKey } = require('../views/sportArt');
 
 const r = express.Router();
-const statusBadge = (ev) => { const s = PUBLIC_STATUS[publicStatus(ev)]; return badge(s.label, s.tone); };
+const statusBadge = async (ev) => { const s = PUBLIC_STATUS[await publicStatus(ev)]; return badge(s.label, s.tone); };
 
 const CTA = { open: ['Inscreva-se', 'go'], soon: ['Em breve', 'off'], soldout: ['Inscrições esgotadas', 'off'], closed: ['Inscrições encerradas', 'off'], completed: ['Ver resultados', 'alt'], cancelled: ['Evento cancelado', 'off'], draft: ['Rascunho', 'off'] };
-function eventCard(ev) {
-  const st = publicStatus(ev); const [label, tone] = CTA[st] || ['Ver evento', 'go'];
+async function eventCard(ev) {
+  const st = await publicStatus(ev); const [label, tone] = CTA[st] || ['Ver evento', 'go'];
   const href = st === 'completed' ? `/e/${ev.slug}/resultados` : `/e/${ev.slug}`;
   return html`<article class="event-card">
     <a href="/e/${ev.slug}" class="event-cover" style="${ev.cover_path ? `background-image:url('/media/${ev.cover_path}')` : ''}" aria-hidden="true" tabindex="-1">${ev.cover_path ? '' : html`<span class="cover-art">${raw(art(sportKey(ev.sport)))}</span><span class="cover-sport">${ev.sport || 'Corrida'}</span>`}</a>
@@ -36,30 +36,30 @@ function searchPanel(q = {}) {
     <div class="sp-actions"><button class="btn">Buscar</button><a class="btn btn-outline" href="/eventos">Limpar</a></div></form>`;
 }
 
-r.get('/', (req, res) => {
-  const evs = db.all("SELECT * FROM events WHERE status='published' AND start_utc > ? ORDER BY start_utc LIMIT 12", new Date().toISOString());
+r.get('/', async (req, res) => {
+  const evs = await db.all("SELECT * FROM events WHERE status='published' AND start_utc > ? ORDER BY start_utc LIMIT 12", new Date().toISOString());
   res.page({ title: null, description: 'Encontre corridas e eventos esportivos, inscreva-se e acompanhe seus resultados.', body: html`
   <section class="hero"><div class="hero-figure" aria-hidden="true">${raw(art('run'))}</div><div class="hero-in"><h1>Sua próxima largada começa aqui</h1><p>Provas de corrida, ciclismo, triathlon e trail com inscrições abertas. Escolha a sua e vá além do seu limite.</p></div></section>
   ${searchPanel()}
   <nav class="sport-strip" aria-label="Modalidades">${[['run', 'Corrida', 'Corrida de rua'], ['trail', 'Trail', 'Trail'], ['bike', 'Ciclismo', 'Ciclismo'], ['swim', 'Triathlon', 'Triathlon'], ['medal', 'Resultados', null]].map(([k, l, m]) => html`<a class="sport-chip" href="${m ? `/eventos?modalidade=${encodeURIComponent(m)}` : '/minha-conta/historico'}"><span class="chip-art" aria-hidden="true">${raw(art(k))}</span>${l}</a>`)}</nav>
   <section><div class="section-head"><h2>Próximos eventos</h2><a href="/eventos">Ver todos</a></div>
-  <div class="grid grid-events">${evs.length ? evs.map(eventCard) : empty('Nenhum evento publicado ainda.')}</div></section>
+  <div class="grid grid-events">${evs.length ? await Promise.all(evs.map(eventCard)) : empty('Nenhum evento publicado ainda.')}</div></section>
   <section class="org-strip"><div><h2>Organiza eventos?</h2><p>Cadastre sua empresa e publique sua prova sozinho, em poucos passos.</p></div><a class="btn btn-lg" href="/organizadores">Quero organizar</a></section>` });
 });
 
-r.get('/eventos', (req, res) => {
+r.get('/eventos', async (req, res) => {
   const q = req.query; const where = ["e.status IN ('published','closed','completed','cancelled')"]; const p = [];
-  if (q.q) { where.push('(e.name LIKE ? OR e.city LIKE ?)'); p.push(`%${q.q}%`, `%${q.q}%`); }
+  if (q.q) { where.push('(e.name ILIKE ? OR e.city ILIKE ?)'); p.push(`%${q.q}%`, `%${q.q}%`); }
   if (q.uf) { where.push('e.state=?'); p.push(q.uf); }
-  if (q.cidade) { where.push('e.city LIKE ?'); p.push(`%${q.cidade}%`); }
+  if (q.cidade) { where.push('e.city ILIKE ?'); p.push(`%${q.cidade}%`); }
   if (q.modalidade) { where.push('e.sport=?'); p.push(q.modalidade); }
   if (q.de) { where.push('e.start_utc>=?'); p.push(q.de); }
   if (q.ate) { where.push('e.start_utc<=?'); p.push(q.ate + 'T23:59:59Z'); }
   if (q.dist) { const [a, b] = String(q.dist).split('-').map(Number); where.push('EXISTS (SELECT 1 FROM modalities m WHERE m.event_id=e.id AND m.distance_km>=? AND m.distance_km<=?)'); p.push(a || 0, b || 1000); }
   if (!q.passados) { where.push('e.start_utc>=?'); p.push(new Date(Date.now() - 864e5).toISOString()); }
-  let evs = db.all(`SELECT e.* FROM events e WHERE ${where.join(' AND ')} ORDER BY e.start_utc LIMIT 60`, ...p);
-  if (q.abertas) evs = evs.filter((e) => publicStatus(e) === 'open');
-  const sports = db.all("SELECT DISTINCT sport FROM events WHERE status<>'draft' ORDER BY sport").map((s) => s.sport);
+  let evs = await db.all(`SELECT e.* FROM events e WHERE ${where.join(' AND ')} ORDER BY e.start_utc LIMIT 60`, ...p);
+  if (q.abertas) evs = await filterAsync(evs, async (e) => await publicStatus(e) === 'open');
+  const sports = (await db.all("SELECT DISTINCT sport FROM events WHERE status<>'draft' ORDER BY sport")).map((s) => s.sport);
   res.page({ title: 'Eventos', wide: true, body: html`<h1>Eventos</h1>${searchPanel(q)}
   <details class="more-filters" ${q.cidade || q.modalidade || q.dist || q.passados ? 'open' : ''}><summary>Mais filtros</summary>
   <form class="filters card" role="search" aria-label="Filtrar eventos">
@@ -70,37 +70,37 @@ r.get('/eventos', (req, res) => {
     ${field('passados', 'Incluir eventos passados', { type: 'checkbox', value: q.passados })}
     ${q.abertas ? html`<input type="hidden" name="abertas" value="1">` : ''}<div class="filters-actions"><button class="btn">Filtrar</button> <a href="/eventos">Limpar</a></div></form></details>
   <p class="muted" aria-live="polite">${evs.length} evento(s) encontrado(s).</p>
-  <div class="grid">${evs.length ? evs.map(eventCard) : empty('Nenhum evento corresponde aos filtros. Tente ampliar a busca.')}</div>` });
+  <div class="grid">${evs.length ? await Promise.all(evs.map(eventCard)) : empty('Nenhum evento corresponde aos filtros. Tente ampliar a busca.')}</div>` });
 });
 
-function loadPublicEvent(req) {
-  const ev = db.one('SELECT * FROM events WHERE slug=?', req.params.slug);
+async function loadPublicEvent(req) {
+  const ev = await db.one('SELECT * FROM events WHERE slug=?', req.params.slug);
   if (!ev) throw new NotFound('Evento não encontrado.');
   if (ev.status === 'draft') {
-    const isMember = req.user && db.one('SELECT 1 FROM org_members WHERE org_id=? AND user_id=?', ev.org_id, req.user.id);
+    const isMember = req.user && await db.one('SELECT 1 FROM org_members WHERE org_id=? AND user_id=?', ev.org_id, req.user.id);
     if (!isMember) throw new NotFound('Evento não encontrado.');
   }
   return ev;
 }
 
-r.get('/e/:slug', (req, res) => {
-  const ev = loadPublicEvent(req);
-  const org = db.one('SELECT trade_name, legal_name, logo_path, website, support_email, support_phone, bio FROM organizations WHERE id=?', ev.org_id);
-  const mods = db.all('SELECT * FROM modalities WHERE event_id=? ORDER BY sort,id', ev.id);
-  const lots = db.all('SELECT l.*, m.name modality_name FROM lots l LEFT JOIN modalities m ON m.id=l.modality_id WHERE l.event_id=? ORDER BY l.sort, l.id', ev.id);
-  const kits = db.all('SELECT * FROM kits WHERE event_id=?', ev.id);
-  const cats = db.all('SELECT * FROM categories WHERE event_id=?', ev.id);
-  const products = db.all('SELECT * FROM products WHERE event_id=? AND active=1', ev.id);
-  const st = publicStatus(ev);
-  const fav = req.user && db.one('SELECT 1 FROM favorites WHERE user_id=? AND event_id=?', req.user.id, ev.id);
+r.get('/e/:slug', async (req, res) => {
+  const ev = await loadPublicEvent(req);
+  const org = await db.one('SELECT trade_name, legal_name, logo_path, website, support_email, support_phone, bio FROM organizations WHERE id=?', ev.org_id);
+  const mods = await db.all('SELECT * FROM modalities WHERE event_id=? ORDER BY sort,id', ev.id);
+  const lots = await db.all('SELECT l.*, m.name modality_name FROM lots l LEFT JOIN modalities m ON m.id=l.modality_id WHERE l.event_id=? ORDER BY l.sort, l.id', ev.id);
+  const kits = await db.all('SELECT * FROM kits WHERE event_id=?', ev.id);
+  const cats = await db.all('SELECT * FROM categories WHERE event_id=?', ev.id);
+  const products = await db.all('SELECT * FROM products WHERE event_id=? AND active=1', ev.id);
+  const st = await publicStatus(ev);
+  const fav = req.user && await db.one('SELECT 1 FROM favorites WHERE user_id=? AND event_id=?', req.user.id, ev.id);
   const url = `${config.baseUrl}/e/${ev.slug}`;
   const now = new Date().toISOString();
-  const published = currentPublished(ev.id);
+  const published = await currentPublished(ev.id);
   res.page({ title: ev.name, description: (ev.description || '').slice(0, 160), wide: true, body: html`
   ${ev.status === 'draft' ? raw('<div class="alert alert-warn">Prévia de rascunho privado — visível apenas para a equipe do organizador.</div>') : ''}
   ${ev.is_demo ? raw('<div class="alert alert-info">Evento fictício de demonstração.</div>') : ''}
   <section class="event-hero" style="${ev.cover_path ? `--cover:url('/media/${ev.cover_path}')` : ''}"><div>
-    ${statusBadge(ev)}<h1>${ev.name}</h1>
+    ${await statusBadge(ev)}<h1>${ev.name}</h1>
     <p class="lead">${fmtDate(ev.start_utc, ev.timezone)} · largada ${fmtTime(ev.start_utc, ev.timezone)} (horário de ${tzLabel(ev.timezone)})</p>
     <p>${ev.venue ? `${ev.venue} — ` : ''}${ev.address}, ${ev.city}/${ev.state}</p>
     <div class="actions">${st === 'open' ? html`<a class="btn btn-lg" href="/e/${ev.slug}/inscricao">Inscrever-se</a>` : ''}
@@ -111,13 +111,13 @@ r.get('/e/:slug', (req, res) => {
       <a class="btn btn-ghost" href="/e/${ev.slug}/calendario.ics">Adicionar à agenda</a></div></div></section>
   <div class="cols"><div class="col-main">
     <section class="card"><h2>Sobre o evento</h2><div class="prose">${raw(paragraphs(ev.description))}</div></section>
-    <section class="card"><h2>Modalidades e percurso</h2>${mods.map((m) => html`<p><strong>${m.name}</strong>${m.distance_km ? ` — ${String(m.distance_km).replace('.', ',')} km` : ''}${m.start_time ? ` · largada ${m.start_time}` : ''}${m.capacity ? ` · ${Math.max(0, m.capacity - counts.modality(m.id))} vagas restantes de ${m.capacity}` : ''}</p>`)}
+    <section class="card"><h2>Modalidades e percurso</h2>${await Promise.all(mods.map(async (m) => html`<p><strong>${m.name}</strong>${m.distance_km ? ` — ${String(m.distance_km).replace('.', ',')} km` : ''}${m.start_time ? ` · largada ${m.start_time}` : ''}${m.capacity ? ` · ${Math.max(0, m.capacity - await counts.modality(m.id))} vagas restantes de ${m.capacity}` : ''}</p>`))}
       ${ev.route_info ? html`<div class="prose">${raw(paragraphs(ev.route_info))}</div>` : ''}${ev.route_url ? html`<p><a href="${ev.route_url}" rel="noopener" target="_blank">Ver mapa do percurso</a></p>` : ''}
       ${cats.length ? html`<h3>Categorias</h3><p>${cats.map((c) => c.name).join(' · ')}</p>` : ''}</section>
     <section class="card"><h2>Lotes e preços</h2>${lots.length ? html`<div class="table-wrap"><table><thead><tr><th>Lote</th><th>Modalidade</th><th>Preço</th><th>Período</th><th>Situação</th></tr></thead><tbody>
-      ${lots.map((l) => { const cur = mods.some((m) => currentLot(ev.id, m.id)?.id === l.id); const ended = (l.ends_utc && l.ends_utc <= now) || (l.quantity != null && counts.lot(l.id) >= l.quantity); return html`<tr><td>${l.name}</td><td>${l.modality_name || 'Todas'}</td><td>${l.price_cents ? brl(l.price_cents) : 'Gratuito'}</td><td>${l.starts_utc ? fmtDateTime(l.starts_utc, ev.timezone) : 'Imediato'} – ${l.ends_utc ? fmtDateTime(l.ends_utc, ev.timezone) : 'até esgotar'}</td><td>${cur ? badge('Vigente', 'ok') : ended ? badge('Encerrado', 'muted') : badge('Futuro', 'info')}</td></tr>`; })}</tbody></table></div>
+      ${await Promise.all(lots.map(async (l) => { const cur = await someAsync(mods, async (m) => (await currentLot(ev.id, m.id))?.id === l.id); const ended = (l.ends_utc && l.ends_utc <= now) || (l.quantity != null && await counts.lot(l.id) >= l.quantity); return html`<tr><td>${l.name}</td><td>${l.modality_name || 'Todas'}</td><td>${l.price_cents ? brl(l.price_cents) : 'Gratuito'}</td><td>${l.starts_utc ? fmtDateTime(l.starts_utc, ev.timezone) : 'Imediato'} – ${l.ends_utc ? fmtDateTime(l.ends_utc, ev.timezone) : 'até esgotar'}</td><td>${cur ? badge('Vigente', 'ok') : ended ? badge('Encerrado', 'muted') : badge('Futuro', 'info')}</td></tr>`; }))}</tbody></table></div>
       ${ev.fee_percent > 0 && ev.fee_payer === 'athlete' ? html`<p class="muted">Taxa de serviço de ${String(ev.fee_percent).replace('.', ',')}% acrescida no pagamento.</p>` : ''}` : empty('Preços ainda não divulgados.')}</section>
-    ${kits.length ? html`<section class="card"><h2>Kits</h2>${kits.map((k) => html`<h3>${k.name}${k.extra_price_cents ? ` (+ ${brl(k.extra_price_cents)})` : ''}</h3><p>${k.description}</p>${k.has_shirt ? html`<p class="muted">Camiseta: ${db.all('SELECT size FROM kit_sizes WHERE kit_id=? ORDER BY id', k.id).map((s) => s.size).join(', ')}</p>` : ''}`)}
+    ${kits.length ? html`<section class="card"><h2>Kits</h2>${await Promise.all(kits.map(async (k) => html`<h3>${k.name}${k.extra_price_cents ? ` (+ ${brl(k.extra_price_cents)})` : ''}</h3><p>${k.description}</p>${k.has_shirt ? html`<p class="muted">Camiseta: ${(await db.all('SELECT size FROM kit_sizes WHERE kit_id=? ORDER BY id', k.id)).map((s) => s.size).join(', ')}</p>` : ''}`))}
       ${products.length ? html`<h3>Produtos extras</h3><p>${products.map((p) => `${p.name} (${brl(p.price_cents)})`).join(' · ')}</p>` : ''}</section>` : ''}
     <section class="card"><h2>Retirada do kit</h2><div class="prose">${raw(paragraphs(ev.kit_pickup_info || 'A divulgar.'))}</div></section>
     <section class="card"><h2>Regulamento</h2><details><summary>Ler regulamento completo (versão ${ev.regulation_version})</summary><div class="prose">${raw(paragraphs(ev.regulation))}</div></details>
@@ -129,10 +129,10 @@ r.get('/e/:slug', (req, res) => {
 });
 const paragraphs = (t) => String(t || '').split(/\n{2,}|\r\n\r\n/).map((p) => `<p>${require('../lib/util').esc(p).replace(/\n/g, '<br>')}</p>`).join('');
 
-r.post('/e/:slug/favorito', requireUser, (req, res) => {
-  const ev = loadPublicEvent(req);
-  if (db.one('SELECT 1 FROM favorites WHERE user_id=? AND event_id=?', req.user.id, ev.id)) db.run('DELETE FROM favorites WHERE user_id=? AND event_id=?', req.user.id, ev.id);
-  else db.run('INSERT INTO favorites(user_id,event_id) VALUES(?,?)', req.user.id, ev.id);
+r.post('/e/:slug/favorito', requireUser, async (req, res) => {
+  const ev = await loadPublicEvent(req);
+  if (await db.one('SELECT 1 FROM favorites WHERE user_id=? AND event_id=?', req.user.id, ev.id)) await db.run('DELETE FROM favorites WHERE user_id=? AND event_id=?', req.user.id, ev.id);
+  else await db.run('INSERT INTO favorites(user_id,event_id) VALUES(?,?)', req.user.id, ev.id);
   res.redirect(303, `/e/${ev.slug}`);
 });
 
@@ -140,19 +140,19 @@ const icsDate = (iso) => iso.replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 function ics(evs) {
   return ['BEGIN:VCALENDAR', 'VERSION:2.0', `PRODID:-//${APP_NAME}//PT-BR`, ...evs.flatMap((e) => ['BEGIN:VEVENT', `UID:evento-${e.id}@${APP_NAME.toLowerCase()}`, `DTSTAMP:${icsDate(new Date().toISOString())}`, `DTSTART:${icsDate(e.start_utc)}`, `DTEND:${icsDate(new Date(new Date(e.start_utc).getTime() + 3 * 3600e3).toISOString())}`, `SUMMARY:${e.name.replace(/[,;]/g, ' ')}`, `LOCATION:${(e.address + ' ' + e.city + '/' + e.state).replace(/[,;]/g, ' ')}`, `URL:${config.baseUrl}/e/${e.slug}`, 'BEGIN:VALARM', 'TRIGGER:-P1D', 'ACTION:DISPLAY', 'DESCRIPTION:Lembrete de prova', 'END:VALARM', 'END:VEVENT']), 'END:VCALENDAR'].join('\r\n');
 }
-r.get('/e/:slug/calendario.ics', (req, res) => { const ev = loadPublicEvent(req); res.type('text/calendar').attachment(`${ev.slug}.ics`).send(ics([ev])); });
-r.get('/minha-agenda.ics', requireUser, (req, res) => {
-  const evs = db.all("SELECT DISTINCT e.* FROM events e WHERE e.status IN ('published','closed') AND (e.id IN (SELECT event_id FROM favorites WHERE user_id=?) OR e.id IN (SELECT event_id FROM registrations WHERE (user_id=? OR buyer_user_id=?) AND status='confirmed'))", req.user.id, req.user.id, req.user.id);
+r.get('/e/:slug/calendario.ics', async (req, res) => { const ev = await loadPublicEvent(req); res.type('text/calendar').attachment(`${ev.slug}.ics`).send(ics([ev])); });
+r.get('/minha-agenda.ics', requireUser, async (req, res) => {
+  const evs = await db.all("SELECT DISTINCT e.* FROM events e WHERE e.status IN ('published','closed') AND (e.id IN (SELECT event_id FROM favorites WHERE user_id=?) OR e.id IN (SELECT event_id FROM registrations WHERE (user_id=? OR buyer_user_id=?) AND status='confirmed'))", req.user.id, req.user.id, req.user.id);
   res.type('text/calendar').attachment('minha-agenda.ics').send(ics(evs));
 });
 
-r.get('/e/:slug/resultados', (req, res) => {
-  const ev = loadPublicEvent(req);
-  const v = currentPublished(ev.id);
-  const mods = db.all('SELECT * FROM modalities WHERE event_id=? ORDER BY sort,id', ev.id);
+r.get('/e/:slug/resultados', async (req, res) => {
+  const ev = await loadPublicEvent(req);
+  const v = await currentPublished(ev.id);
+  const mods = await db.all('SELECT * FROM modalities WHERE event_id=? ORDER BY sort,id', ev.id);
   const mod = Number(req.query.modalidade) || mods[0]?.id;
-  const rows = v ? versionRows(v.id).filter((x) => x.modality_id === mod) : [];
-  const hidden = new Set(db.all('SELECT g.bib FROM registrations g JOIN users u ON u.id=g.user_id WHERE g.event_id=? AND u.public_results=0', ev.id).map((x) => x.bib));
+  const rows = v ? (await versionRows(v.id)).filter((x) => x.modality_id === mod) : [];
+  const hidden = new Set((await db.all('SELECT g.bib FROM registrations g JOIN users u ON u.id=g.user_id WHERE g.event_id=? AND u.public_results=0', ev.id)).map((x) => x.bib));
   const q = String(req.query.q || '').toLowerCase();
   const list = rows.filter((x) => !q || x.bib === q || x.name.toLowerCase().includes(q));
   res.page({ title: `Resultados — ${ev.name}`, wide: true, body: html`<h1>Resultados — ${ev.name}</h1>
@@ -164,8 +164,8 @@ r.get('/e/:slug/resultados', (req, res) => {
 });
 
 // Página pública para organizadores
-r.get('/organizadores', (req, res) => {
-  const s = settings();
+r.get('/organizadores', async (req, res) => {
+  const s = await settings();
   res.page({ title: 'Para organizadores', description: 'Publique seu evento esportivo, venda inscrições e gerencie kits e resultados.', body: html`
   <section class="hero hero-org"><div><span class="hero-tag">Para organizadores</span><h1>Organize seu evento do cadastro ao resultado — sem depender de ninguém.</h1>
     <p>Crie sua conta, cadastre a empresa, configure recebimentos e publique o primeiro evento por um fluxo guiado. Sem convite e sem contato comercial obrigatório.</p>

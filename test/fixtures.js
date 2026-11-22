@@ -21,17 +21,17 @@ async function organizer({ approve = true, payments = true, label = 'Org' } = {}
   await c.post('/organizador/cadastro/3', { acao: 'avancar', support_email: `atendimento${n}@teste.local`, support_phone: '(31) 99999-0000', accept_terms: 1, accept_privacy: 1, accept_organizer: 1 });
   const r4 = await c.post('/organizador/cadastro/4', { acao: 'concluir' });
   assert.match(r4.text, /Primeiros passos/);
-  const org = db.one('SELECT o.* FROM organizations o JOIN org_members m ON m.org_id=o.id JOIN users u ON u.id=m.user_id WHERE u.email=?', email);
+  const org = await db.one('SELECT o.* FROM organizations o JOIN org_members m ON m.org_id=o.id JOIN users u ON u.id=m.user_id WHERE u.email=?', email);
   if (approve) await adminApprove(org.id);
   if (payments) await c.post('/organizador/recebimentos/teste', {});
-  return { c, email, org: db.one('SELECT * FROM organizations WHERE id=?', org.id) };
+  return { c, email, org: await db.one('SELECT * FROM organizations WHERE id=?', org.id) };
 }
 async function adminApprove(orgId) {
-  const a = new h.Client(); await h.login(a, h.makeAdmin());
+  const a = new h.Client(); await h.login(a, await h.makeAdmin());
   await a.post('/contexto', { context: 'admin' });
-  for (const d of db.all('SELECT id FROM documents WHERE org_id=?', orgId)) await a.post(`/admin/documentos/${d.id}`, { decisao: 'verified', note: 'ok' });
+  for (const d of await db.all('SELECT id FROM documents WHERE org_id=?', orgId)) await a.post(`/admin/documentos/${d.id}`, { decisao: 'verified', note: 'ok' });
   const r = await a.post(`/admin/organizadores/${orgId}/decisao`, { decisao: 'active', note: 'Aprovado em teste' });
-  assert.equal(db.one('SELECT status FROM organizations WHERE id=?', orgId).status, 'active', r.text.slice(0, 300));
+  assert.equal((await db.one('SELECT status FROM organizations WHERE id=?', orgId)).status, 'active', r.text.slice(0, 300));
   return a;
 }
 
@@ -58,8 +58,8 @@ async function event(c, { price = '50,00', capacity, modCapacity, sizes = 'P:10,
   await step(7, { kit_pickup_info: 'Retirada na loja parceira, sábado das 9h às 18h.', support_email: 'evento@teste.local', support_phone: '(31) 98888-0000', allow_third_party_pickup: 1 });
   await c.post(`/organizador/eventos/${id}/itens/point`, { name: 'Balcão 1' });
   await step(8, { fee_payer: 'athlete', reservation_minutes: reservation ?? 15 });
-  if (publish) { const p = await c.post(`/organizador/eventos/${id}/publicar`, {}); assert.equal(db.one('SELECT status FROM events WHERE id=?', id).status, 'published', p.text.match(/alert[^<]*<[^]*?<\/div>/)?.[0] || p.text.slice(0, 800)); }
-  return db.one('SELECT * FROM events WHERE id=?', id);
+  if (publish) { const p = await c.post(`/organizador/eventos/${id}/publicar`, {}); assert.equal((await db.one('SELECT status FROM events WHERE id=?', id)).status, 'published', p.text.match(/alert[^<]*<[^]*?<\/div>/)?.[0] || p.text.slice(0, 800)); }
+  return await db.one('SELECT * FROM events WHERE id=?', id);
 }
 
 let athleteSeq = 200;
@@ -67,17 +67,17 @@ async function athlete() {
   const n = ++athleteSeq; const c = new h.Client(); const email = `atleta${n}@teste.local`;
   await h.signup(c, { name: `Atleta Teste ${n}`, email });
   await h.verifyEmail(c, email);
-  return { c, email, cpf: h.cpfFrom(String(123456000 + n)), user: db.one('SELECT * FROM users WHERE email=?', email) };
+  return { c, email, cpf: h.cpfFrom(String(123456000 + n)), user: await db.one('SELECT * FROM users WHERE email=?', email) };
 }
-function participant(ev, a, over = {}) {
-  const mod = db.one("SELECT id FROM modalities WHERE event_id=? AND name='5 km'", ev.id);
-  const kit = db.one('SELECT id FROM kits WHERE event_id=?', ev.id);
+async function participant(ev, a, over = {}) {
+  const mod = await db.one("SELECT id FROM modalities WHERE event_id=? AND name='5 km'", ev.id);
+  const kit = await db.one('SELECT id FROM kits WHERE event_id=?', ev.id);
   return { name: a.user.name, cpf: a.cpf, birth_date: '1990-05-10', gender: 'F', modality_id: mod.id, kit_id: kit?.id, kit_size: 'M', ...over };
 }
 async function register(a, ev, over = {}, extra = {}) {
-  const r = await a.c.post(`/e/${ev.slug}/inscricao?n=1`, { p: { 0: participant(ev, a, over) }, accept: 1, ...extra });
+  const r = await a.c.post(`/e/${ev.slug}/inscricao?n=1`, { p: { 0: await participant(ev, a, over) }, accept: 1, ...extra });
   const m = /\/pedido\/(P[0-9A-F]+)/.exec(r.url);
-  return { r, code: m?.[1], order: m ? db.one('SELECT * FROM orders WHERE code=?', m[1]) : null };
+  return { r, code: m?.[1], order: m ? await db.one('SELECT * FROM orders WHERE code=?', m[1]) : null };
 }
 async function pay(a, code, acao = 'approved:pix') {
   await a.c.post(`/pedido/${code}/pagar`, {}, { follow: false });

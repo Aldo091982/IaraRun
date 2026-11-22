@@ -9,8 +9,8 @@ const { page } = require('./views/layout');
 
 function parseCookies(h = '') { return Object.fromEntries(h.split(';').map((c) => c.trim().split('=')).filter((p) => p[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))])); }
 
-function createApp() {
-  db.open();
+async function createApp() {
+  await db.open();
   const app = express();
   app.set('trust proxy', config.isProd ? 1 : false);
   app.disable('x-powered-by');
@@ -30,7 +30,7 @@ function createApp() {
   app.use(express.json({ limit: '1mb' }));
 
   // Cookies, sessão e CSRF (double-submit + SameSite=Lax)
-  app.use((req, res, next) => {
+  app.use(async (req, res, next) => {
     req.cookies = parseCookies(req.headers.cookie);
     const cookieOpts = { httpOnly: true, sameSite: 'lax', secure: config.isProd, path: '/' };
     res.setCookie = (n, v, o = {}) => res.cookie(n, v, { ...cookieOpts, ...o });
@@ -43,16 +43,16 @@ function createApp() {
     res.flash = (type, msg) => { const f = [...(res._flash || []), { type, msg }]; res._flash = f; res.setCookie('flash', JSON.stringify(f), { maxAge: 60000 }); };
     const sid = req.cookies.sid;
     if (sid) {
-      const s = db.one('SELECT * FROM sessions WHERE id=? AND expires_at>?', sid, new Date().toISOString());
+      const s = await db.one('SELECT * FROM sessions WHERE id=? AND expires_at>?', sid, new Date().toISOString());
       if (s) {
-        const u = db.one("SELECT * FROM users WHERE id=? AND status='active'", s.user_id);
-        if (u) { req.session = s; req.user = u; req.memberships = memberships(u.id); }
+        const u = await db.one("SELECT * FROM users WHERE id=? AND status='active'", s.user_id);
+        if (u) { req.session = s; req.user = u; req.memberships = await memberships(u.id); }
       }
     }
     if (req.user && req.session.context.startsWith('org:')) {
       const orgId = Number(req.session.context.slice(4));
-      req.member = membership(req.user.id, orgId);
-      req.org = req.member ? db.one('SELECT * FROM organizations WHERE id=?', orgId) : null;
+      req.member = await membership(req.user.id, orgId);
+      req.org = req.member ? await db.one('SELECT * FROM organizations WHERE id=?', orgId) : null;
     }
     next();
   });

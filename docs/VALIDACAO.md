@@ -1,6 +1,6 @@
 # Relatório de validação — v0.1.0 (17/11/2026)
 
-`npm test`: **38 testes, 38 aprovados**. Todos rodam contra o app HTTP real (cookies, CSRF, uploads multipart), com banco e pastas temporários por arquivo de teste. Pagamentos passam pelo **simulador local**, que usa o mesmo pipeline de webhook assinado e consulta ao provedor do Mercado Pago. **Ainda não houve teste no sandbox real do Mercado Pago**: faltam credenciais `TEST-`.
+`npm test`: **38 testes, 38 aprovados**. Todos rodam contra o app HTTP real (cookies, CSRF, uploads multipart), com um banco PostgreSQL e pastas temporários por arquivo de teste (servidor local criado por `scripts/pg-local.js`, ou `TEST_DATABASE_URL`). Pagamentos passam pelo **simulador local**, que usa o mesmo pipeline de webhook assinado e consulta ao provedor do Mercado Pago. **Ainda não houve teste no sandbox real do Mercado Pago**: faltam credenciais `TEST-`.
 
 | Critério (itens 19 e 21.11) | Teste |
 |---|---|
@@ -29,7 +29,7 @@
 | Entrar/criar conta com Google: aceite dos termos antes de criar, e-mail verificado, vínculo com conta existente, state de uso único e preso ao navegador, conferência de emissor, público, nonce e e-mail verificado | `07` |
 | Todas as telas carregam para público, atleta, organizador e administração (dados demo) | `05` |
 
-Sobre concorrência: as requisições simultâneas do teste `03` chegam ao servidor em paralelo. A garantia contra venda acima da capacidade vem da transação `BEGIN IMMEDIATE`, que serializa as escritas, e não da ordem de chegada.
+Sobre concorrência: as requisições simultâneas do teste `03` chegam ao servidor em paralelo. A garantia contra venda acima da capacidade vem da transação com trava consultiva do PostgreSQL (`pg_advisory_xact_lock`), que serializa as escritas, e não da ordem de chegada.
 
 ## Não validado nesta versão
 - Login real com Google (os testes simulam a resposta do Google).

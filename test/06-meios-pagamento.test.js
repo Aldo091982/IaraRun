@@ -32,7 +32,7 @@ function restore() { global.fetch = realFetch; Object.assign(config.paypal, save
 let o, ev;
 before(async () => { await h.start(); o = await f.organizer(); ev = await f.event(o.c); });
 async function newOrder() { const a = await f.athlete(); const r = await f.register(a, ev); return { a, order: r.order }; }
-const order = (code) => db.one('SELECT * FROM orders WHERE code=?', code);
+const order = async (code) => await db.one('SELECT * FROM orders WHERE code=?', code);
 
 test('pedido oferece Mercado Pago, PayPal e PicPay; PayPal simulado confirma a inscrição', async () => {
   const { a, order: ord } = await newOrder();
@@ -42,8 +42,8 @@ test('pedido oferece Mercado Pago, PayPal e PicPay; PayPal simulado confirma a i
   assert.match(go.url, /meio=paypal/);
   assert.match(go.text, /Checkout simulado · PayPal/);
   await a.c.post(`/dev/pagamento-simulado/${ord.code}`, { acao: 'approved:paypal', meio: 'paypal' });
-  assert.equal(order(ord.code).status, 'paid');
-  assert.equal(db.one('SELECT method FROM payments WHERE order_id=?', ord.id).method, 'paypal');
+  assert.equal((await order(ord.code)).status, 'paid');
+  assert.equal((await db.one('SELECT method FROM payments WHERE order_id=?', ord.id)).method, 'paypal');
   assert.match((await a.c.get(`/pedido/${ord.code}`)).text, /<td>PayPal<\/td>/);
 });
 
@@ -74,7 +74,7 @@ test('PayPal real: cria ordem em BRL, captura no retorno e valida o valor', asyn
   assert.equal(create.body.purchase_units[0].custom_id, ord.code);
   assert.equal(create.headers['PayPal-Request-Id'], `ppo-${ord.code}`, 'criação idempotente');
   await a.c.get('/pagamento/paypal/retorno?token=PPO1');
-  assert.equal(order(ord.code).status, 'paid');
+  assert.equal((await order(ord.code)).status, 'paid');
 
   // Valor divergente em outro pedido vira exceção, não confirmação
   const second = await newOrder();
@@ -83,7 +83,7 @@ test('PayPal real: cria ordem em BRL, captura no retorno e valida o valor', asyn
   api['/v2/payments/captures/CAP2'] = () => [200, { id: 'CAP2', status: 'COMPLETED', amount: { value: '1.00', currency_code: 'BRL' }, custom_id: second.order.code, update_time: new Date().toISOString() }];
   await second.a.c.post(`/pedido/${second.order.code}/pagar`, { meio: 'paypal' }, { follow: false });
   await second.a.c.get('/pagamento/paypal/retorno?token=PPO2');
-  assert.equal(order(second.order.code).status, 'exception');
+  assert.equal((await order(second.order.code)).status, 'exception');
 });
 
 test('PayPal webhook: assinatura recusada pelo PayPal retorna 401 e nada muda', async (t) => {
@@ -117,10 +117,10 @@ test('PicPay: cobrança com CPF do comprador, callback autenticado, reembolso s�
   assert.equal((await handlePicpay({ 'x-seller-token': 'errado' }, { referenceId: ord.code })).status, 401);
   status = 'paid';
   assert.equal((await handlePicpay({ 'x-seller-token': 'seller-123' }, { referenceId: ord.code, authorizationId: 'AUTH1' })).status, 200);
-  assert.equal(order(ord.code).status, 'paid');
+  assert.equal((await order(ord.code)).status, 'paid');
 
-  await assert.rejects(() => payments.refund(order(ord.code), 100, null), /reembolso do valor total/);
-  await payments.refund(order(ord.code), ord.total_cents, null);
-  assert.equal(order(ord.code).status, 'refunded');
+  await assert.rejects(async () => await payments.refund(await order(ord.code), 100, null), /reembolso do valor total/);
+  await payments.refund(await order(ord.code), ord.total_cents, null);
+  assert.equal((await order(ord.code)).status, 'refunded');
   assert.ok(calls.some((c) => c.url.endsWith('/cancellations') && c.body.authorizationId === 'AUTH1'));
 });

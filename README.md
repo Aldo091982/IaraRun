@@ -9,7 +9,7 @@ Divulgação e gestão de eventos esportivos: cadastro autônomo do organizador,
 | Decisão | Motivo |
 |---|---|
 | Node.js 22 + Express 5, HTML renderizado no servidor | Sem etapa de build. Funciona em celulares simples e sem JavaScript, que só acrescenta melhorias. |
-| SQLite embutido (`node:sqlite`) com migrações versionadas (`src/db.js`) | Não depende de serviço externo. As escritas críticas rodam em `BEGIN IMMEDIATE`, serializadas, o que impede venda acima da capacidade. Para escalar horizontalmente, migrar para PostgreSQL (`SELECT … FOR UPDATE`). |
+| PostgreSQL (driver `pg`) com migrações versionadas e transacionais (`src/db.js`) | As escritas críticas (vagas, estoque, pagamentos) rodam em transação com trava consultiva (`pg_advisory_xact_lock`), o que impede venda acima da capacidade mesmo com várias instâncias do app. Em desenvolvimento, um PostgreSQL local sobe sozinho (`scripts/pg-local.js`), sem instalar nada. |
 | Regras de negócio em `src/lib/*` e rotas finas em `src/routes/*` | Os testes exercitam as mesmas funções que as telas. |
 | Provedores de pagamento atrás de uma interface (`src/lib/payments.js`): Mercado Pago, PayPal e PicPay | O simulador local e os provedores reais passam pelo mesmo pipeline: webhook assinado → consulta do pagamento → validação de valor, moeda, pedido e beneficiário → confirmação idempotente. |
 
@@ -17,15 +17,17 @@ Estrutura: `src/app.js` (middlewares: sessão, CSRF, perfil em uso), `src/routes
 
 ## Executar
 
-Requisitos: Node.js 22.13 ou superior. O SQLite já vem com o Node.
+Requisitos: Node.js 22.13 ou superior. Em desenvolvimento, nada mais: sem `DATABASE_URL`, o app baixa (no `npm install`) e sobe sozinho um PostgreSQL 17 local, na porta 54329, com dados em `storage/pg/`. Para usar um PostgreSQL próprio, defina `DATABASE_URL`.
+
+Comandos do banco local: `npm run db:start`, `npm run db:stop` e `npm run db:status`.
 
 ```bash
 npm install
 cp .env.example .env        # ajuste se quiser; sem .env roda em desenvolvimento com simulador
-npm run migrate             # cria/atualiza o banco do ambiente (storage/development.sqlite)
+npm run migrate             # cria/atualiza o banco do ambiente (plataforma_development)
 npm run seed                # dados FICTÍCIOS de demonstração (bloqueado em produção)
 npm start                   # http://localhost:3000
-npm test                    # 38 testes de ponta a ponta em banco temporário
+npm test                    # 38 testes de ponta a ponta, cada arquivo em um banco PostgreSQL temporário
 ```
 
 Contas de demonstração (senha `demo12345`, somente fora de produção):
@@ -58,9 +60,9 @@ O simulador e as rotas `/dev/*` não são montados em produção.
 
 ## Implantação (produção)
 
-1. Defina `APP_ENV=production`, `SESSION_SECRET` (aleatório e longo) e `BASE_URL` com HTTPS. Os cookies ficam `Secure` e o `trust proxy` fica ativo.
-2. Coloque o app atrás de um proxy HTTPS (Nginx, Caddy ou o balanceador da nuvem). Use processo supervisionado (systemd/PM2) e **uma única instância** enquanto o banco for SQLite.
-3. Banco e arquivos privados ficam em disco persistente com backup. `PRIVATE_STORAGE_DIR` deve ficar fora de qualquer pasta servida e ter backup criptografado.
+1. Defina `APP_ENV=production`, `SESSION_SECRET` (aleatório e longo), `BASE_URL` com HTTPS e `DATABASE_URL` do PostgreSQL (versão 13 ou superior, com a extensão `citext`, disponível nos serviços gerenciados comuns; crie o banco antes). Use `DATABASE_SSL=1` se o provedor exigir SSL. Os cookies ficam `Secure` e o `trust proxy` fica ativo.
+2. Coloque o app atrás de um proxy HTTPS (Nginx, Caddy ou o balanceador da nuvem). Use processo supervisionado (systemd/PM2). Pode rodar mais de uma instância: o controle de vagas vale entre instâncias.
+3. Faça backup do PostgreSQL (o serviço gerenciado costuma oferecer) e mantenha os arquivos privados em disco persistente com backup. `PRIVATE_STORAGE_DIR` deve ficar fora de qualquer pasta servida e ter backup criptografado.
 4. Pagamentos (defina `PAYMENT_RECEIVER_MODEL` e escolha os meios em `PAYMENT_METHODS`):
    - Mercado Pago: credenciais de produção, `MP_WEBHOOK_SECRET` e notificação em `https://SEU_DOMINIO/webhooks/mercadopago` (tópico *Pagamentos*).
    - PayPal: `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_ENV=live` e um webhook em `https://SEU_DOMINIO/webhooks/paypal` com os eventos `CHECKOUT.ORDER.APPROVED` e `PAYMENT.CAPTURE.*`; copie o ID dele para `PAYPAL_WEBHOOK_ID`.

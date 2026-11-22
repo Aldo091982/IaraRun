@@ -6,7 +6,14 @@ const path = require('node:path');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'plataforma-test-'));
 process.env.APP_ENV = 'test';
 process.env.SKIP_ENV_FILE = '1';
-process.env.DB_FILE = path.join(tmp, 'test.sqlite');
+// Cada arquivo de teste usa um banco PostgreSQL próprio e temporário, apagado ao final.
+// Servidor: TEST_DATABASE_URL (sem o nome do banco), ou o PostgreSQL local de testes (scripts/pg-local.js).
+const pgLocal = require('../scripts/pg-local');
+const DB_NAME = `plataforma_test_${process.pid}_${Date.now().toString(36)}`;
+const serverUrl = process.env.TEST_DATABASE_URL ? new URL(process.env.TEST_DATABASE_URL) : new URL(pgLocal.url('test'));
+serverUrl.pathname = `/${DB_NAME}`;
+process.env.DATABASE_URL = serverUrl.toString();
+process.env.DB_CREATE = '1';
 process.env.PRIVATE_STORAGE_DIR = path.join(tmp, 'private');
 process.env.PUBLIC_UPLOAD_DIR = path.join(tmp, 'public');
 process.env.MP_ACCESS_TOKEN = '';
@@ -17,13 +24,14 @@ const { hashPassword } = require('../src/lib/core');
 
 let server, base, starting;
 function start() {
-  starting ||= new Promise((res) => {
-    const app = createApp();
-    server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}`; res(base); });
-  });
+  starting ||= (process.env.TEST_DATABASE_URL ? Promise.resolve() : pgLocal.start('test'))
+    .then(() => createApp())
+    .then((app) => new Promise((res) => {
+      server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}`; res(base); });
+    }));
   return starting;
 }
-function stop() { if (server) server.close(); server = null; db.close(); }
+async function stop() { if (server) server.close(); server = null; await db.dropTestDatabase(); }
 
 // Arquivos mínimos válidos (assinaturas reais)
 const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001', 'hex');
@@ -68,18 +76,18 @@ function flatten(obj, prefix = '', out = {}) {
   }
   return out;
 }
-const lastMailTo = (email) => db.one('SELECT * FROM outbox WHERE to_email=? ORDER BY id DESC', email);
+const lastMailTo = async (email) => await db.one('SELECT * FROM outbox WHERE to_email=? ORDER BY id DESC', email);
 const tokenFrom = (mail, pathStr) => new RegExp(`${pathStr}\\?t=([A-Za-z0-9_-]+)`).exec(mail.body)[1];
 
 async function signup(c, { name, email, perfil }) {
   await c.post('/cadastro', { name, email, password: 'senha-segura-123', accept: 1, perfil: perfil || '' });
-  const mail = lastMailTo(email);
+  const mail = await lastMailTo(email);
   return tokenFrom(mail, '/confirmar-email');
 }
-async function verifyEmail(c, email) { const t = tokenFrom(db.one("SELECT * FROM outbox WHERE to_email=? AND subject LIKE 'Confirme%' ORDER BY id DESC", email), '/confirmar-email'); return c.get(`/confirmar-email?t=${t}`); }
+async function verifyEmail(c, email) { const t = tokenFrom(await db.one("SELECT * FROM outbox WHERE to_email=? AND subject ILIKE 'Confirme%' ORDER BY id DESC", email), '/confirmar-email'); return c.get(`/confirmar-email?t=${t}`); }
 
-function makeAdmin(email = 'admin@teste.local') {
-  if (!db.one('SELECT 1 FROM users WHERE email=?', email)) db.run('INSERT INTO users(email,name,password_hash,is_admin,email_verified_at) VALUES(?,?,?,1,?)', email, 'Admin Teste', hashPassword('senha-segura-123'), new Date().toISOString());
+async function makeAdmin(email = 'admin@teste.local') {
+  if (!await db.one('SELECT 1 FROM users WHERE email=?', email)) await db.run('INSERT INTO users(email,name,password_hash,is_admin,email_verified_at) VALUES(?,?,?,1,?)', email, 'Admin Teste', hashPassword('senha-segura-123'), new Date().toISOString());
   return email;
 }
 async function login(c, email) { const r = await c.post('/entrar', { email, password: 'senha-segura-123' }); return r; }

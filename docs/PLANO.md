@@ -129,7 +129,7 @@ Legenda: ✅ entregue na v1 · 🟡 parcial (o que falta está descrito) · ⏭ 
 | 21.10 Boleto | Decisão tomada: excluído do checkout, pela compensação incompatível com a reserva temporária. |
 
 ## Limitações conhecidas
-- SQLite com instância única. Para alta concorrência ou várias instâncias, migrar para PostgreSQL.
+- Banco PostgreSQL. O controle de vagas usa uma trava única para todas as transações de escrita: é simples e seguro, mas em eventos com picos muito altos de inscrição pode ser trocado por travas por evento.
 - O limite de tentativas de login e da API fica em memória e zera ao reiniciar.
 - Sem worker de e-mail e sem agendador de lembretes.
 - Imagens enviadas não são redimensionadas.

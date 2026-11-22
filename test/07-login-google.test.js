@@ -22,18 +22,18 @@ test('conta nova pelo Google exige aceite dos termos e já nasce com e-mail veri
   const state = stateOf(start);
   const pick = await c.post('/dev/google', { state, email: 'Nova.Google@Teste.local', name: 'Nova Pelo Google' });
   assert.match(pick.url, /\/cadastro\/google\?t=/);
-  assert.equal(db.one('SELECT COUNT(*) n FROM users WHERE email=?', 'nova.google@teste.local').n, 0, 'nada é criado antes do aceite');
+  assert.equal((await db.one('SELECT COUNT(*) n FROM users WHERE email=?', 'nova.google@teste.local')).n, 0, 'nada é criado antes do aceite');
   const t = /\?t=([^&]+)/.exec(pick.url)[1];
   const noAccept = await c.post('/cadastro/google', { t, name: 'Nova Pelo Google' });
   assert.equal(noAccept.status, 400);
   assert.match(noAccept.text, /aceitar os Termos/);
   const done = await c.post('/cadastro/google', { t, name: 'Nova Pelo Google', accept: 1 });
   assert.match(done.url, /\/eventos$/);
-  const u = db.one('SELECT * FROM users WHERE email=?', 'nova.google@teste.local');
+  const u = await db.one('SELECT * FROM users WHERE email=?', 'nova.google@teste.local');
   assert.ok(u.email_verified_at);
   assert.equal(u.marketing_opt_in, 0);
-  assert.ok(db.one("SELECT 1 FROM consents WHERE user_id=? AND doc_key='terms'", u.id));
-  assert.ok(db.one("SELECT 1 FROM user_identities WHERE user_id=? AND provider='google'", u.id));
+  assert.ok(await db.one("SELECT 1 FROM consents WHERE user_id=? AND doc_key='terms'", u.id));
+  assert.ok(await db.one("SELECT 1 FROM user_identities WHERE user_id=? AND provider='google'", u.id));
   // a conta criada pelo Google não aceita senha nenhuma
   const pw = await new h.Client().post('/entrar', { email: u.email, password: '!google' });
   assert.match(pw.text, /incorretos/);
@@ -51,10 +51,10 @@ test('e-mail já cadastrado é vinculado à conta existente, sem duplicar', asyn
   const s = stateOf(await g.get('/entrar/google', { follow: false }));
   const r = await g.post('/dev/google', { state: s, email: 'vinculo@teste.local', name: 'Atleta Senha' });
   assert.match(r.url, /\/minha-conta$/);
-  assert.equal(db.one('SELECT COUNT(*) n FROM users WHERE email=?', 'vinculo@teste.local').n, 1);
-  const u = db.one('SELECT * FROM users WHERE email=?', 'vinculo@teste.local');
+  assert.equal((await db.one('SELECT COUNT(*) n FROM users WHERE email=?', 'vinculo@teste.local')).n, 1);
+  const u = await db.one('SELECT * FROM users WHERE email=?', 'vinculo@teste.local');
   assert.ok(u.email_verified_at, 'Google confirma o e-mail');
-  assert.ok(db.one("SELECT 1 FROM user_identities WHERE user_id=? AND provider='google'", u.id));
+  assert.ok(await db.one("SELECT 1 FROM user_identities WHERE user_id=? AND provider='google'", u.id));
 });
 
 test('state inválido, reutilizado ou de outro navegador é recusado', async () => {
