@@ -59,7 +59,7 @@ test('importação inválida gera relatório de erros e nada é salvo', async ()
   const r = await o.c.post(`/organizador/eventos/${ev.id}/resultados/salvar`, { csv });
   assert.match(r.text, /Nenhuma linha válida|linhas com erro/);
   assert.equal((await db.one('SELECT COUNT(*) n FROM result_versions WHERE event_id=?', ev.id)).n, before);
-  assert.match((await results.preview(ev.id, 'a;b\n1;2')).errors[0], /Colunas obrigatórias/);
+  assert.match((await results.preview(ev.id, 'a;b\n1;2')).errors[0], /Coluna do número de peito não encontrada/);
 });
 
 test('classificação geral, por sexo e categoria; desempate; DNS/DNF/DSQ; correção versionada; revisão', async () => {
@@ -98,6 +98,9 @@ test('classificação geral, por sexo e categoria; desempate; DNS/DNF/DSQ; corre
   await db.run('UPDATE registrations SET user_id=? WHERE id=?', regs[0].a.user.id, A.id);
   const pub = await new h.Client().get(`/e/${ev.slug}/resultados`);
   assert.match(pub.text, /perfil privado/);
+  assert.match(pub.text, /Pódio Geral/);
+  assert.match(pub.text, /1º de [0-9]+/);
+  assert.match((await new h.Client().get(`/e/${ev.slug}/resultados?sexo=F`)).text, /mostra a posição no sexo/);
 });
 
 test('histórico separa registro pessoal de resultado oficial', async () => {
@@ -128,4 +131,16 @@ test('assistente de conteúdo não inventa e mantém texto em rascunho até apro
   assert.equal((await db.one('SELECT description FROM events WHERE id=?', ev.id)).description, before, 'nada muda antes da aprovação');
   await o.c.post(`/organizador/eventos/${ev.id}/assistente/aplicar`, { description: 'Texto aprovado pelo organizador com conteúdo do regulamento.' });
   assert.equal((await db.one('SELECT description FROM events WHERE id=?', ev.id)).description, 'Texto aprovado pelo organizador com conteúdo do regulamento.');
+});
+
+test('importa planilha de cronometragem com nomes de coluna alternativos e mostra posição "Nº de N"', async () => {
+  const csv = `Peito\tAtleta\tChip Time\n${regs[1].reg.bib}\tA\t00:30:00\n${regs[2].reg.bib}\tB\t00:25:00\n${regs[3].reg.bib}\tC\tDNF\n`;
+  const pv = await results.preview(ev.id, csv);
+  assert.deepEqual(pv.rows.map((r) => r.errors), [[], [], []]);
+  assert.equal(pv.rows[2].status, 'dnf');
+  const vid = await results.saveVersion(ev.id, pv.rows, null, 'teste aliases');
+  const rows = await results.versionRows(vid);
+  const t = await results.totals(vid);
+  const b = rows.find((x) => x.bib === regs[2].reg.bib);
+  assert.equal(results.placings(b, t).overall, '1º de 2');
 });

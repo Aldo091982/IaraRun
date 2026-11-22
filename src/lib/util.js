@@ -113,7 +113,8 @@ function toCsv(rows, headers) {
 function parseCsv(text) {
   text = String(text).replace(/^﻿/, '');
   const firstLine = text.split(/\r?\n/)[0] || '';
-  const delim = (firstLine.match(/;/g) || []).length >= (firstLine.match(/,/g) || []).length ? ';' : ',';
+  const cnt = (ch) => firstLine.split(ch).length - 1;
+  const delim = cnt('	') > Math.max(cnt(';'), cnt(',')) ? '	' : cnt(';') >= cnt(',') ? ';' : ',';
   const rows = []; let row = [], cur = '', q = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];

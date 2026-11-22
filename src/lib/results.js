@@ -7,16 +7,26 @@ const STATUS_IN = { CONCLUIU: 'finished', FINISHED: 'finished', '': 'finished', 
 const TEMPLATE_HEADERS = ['numero_peito', 'nome', 'modalidade', 'tempo_bruto', 'tempo_liquido', 'situacao'];
 const TEMPLATE_CSV = '﻿' + TEMPLATE_HEADERS.join(';') + '\r\n1;Nome do Atleta;5 km;00:25:31;00:25:10;CONCLUIU\r\n2;Outra Atleta;10 km;;;NAO_LARGOU\r\n';
 
+// Nomes de coluna aceitos (planilhas exportadas por empresas de cronometragem variam)
+const ALIASES = {
+  numero_peito: ['numero_peito', 'numero', 'num', 'n', 'no', 'peito', 'bib', 'dorsal', 'numero_de_peito', 'n_peito'],
+  nome: ['nome', 'atleta', 'name', 'nome_do_atleta'],
+  modalidade: ['modalidade', 'distancia', 'prova', 'percurso'],
+  tempo_bruto: ['tempo_bruto', 'bruto', 'tempo_oficial', 'gun', 'gun_time', 'tempo_total'],
+  tempo_liquido: ['tempo_liquido', 'liquido', 'tempo', 'chip', 'chip_time', 'net', 'net_time', 'tempo_chip'],
+  situacao: ['situacao', 'status', 'sit'],
+};
+const canonical = (h) => Object.keys(ALIASES).find((k) => ALIASES[k].includes(h.replace(/[^a-z0-9_]/g, ''))) || h;
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toUpperCase().replace(/\s+/g, '_');
 
 /** Lê CSV e devolve prévia com erros por linha. Nada é salvo aqui. */
 async function preview(eventId, text) {
   const rows = parseCsv(text);
   if (!rows.length) return { rows: [], errors: ['Arquivo vazio.'], valid: 0 };
-  const header = rows[0].map((h) => norm(h).toLowerCase());
-  const missing = ['numero_peito', 'tempo_bruto', 'tempo_liquido', 'situacao'].filter((h) => !header.includes(h));
-  if (missing.length) return { rows: [], errors: [`Colunas obrigatórias ausentes: ${missing.join(', ')}. Use o modelo de importação.`], valid: 0 };
-  const col = (r, name) => (r[header.indexOf(name)] ?? '').trim();
+  const header = rows[0].map((h) => canonical(norm(h).toLowerCase()));
+  if (!header.includes('numero_peito')) return { rows: [], errors: ['Coluna do número de peito não encontrada (ex.: "numero_peito", "peito", "num" ou "bib"). Use o modelo de importação.'], valid: 0 };
+  if (!header.includes('tempo_bruto') && !header.includes('tempo_liquido')) return { rows: [], errors: ['Nenhuma coluna de tempo encontrada (ex.: "tempo_liquido", "tempo_bruto", "tempo" ou "chip").'], valid: 0 };
+  const col = (r, name) => (header.includes(name) ? r[header.indexOf(name)] ?? '' : '').trim();
   const regs = new Map((await db.all("SELECT g.*, m.name modality_name, m.distance_km FROM registrations g JOIN modalities m ON m.id=g.modality_id WHERE g.event_id=? AND g.status='confirmed' AND g.bib IS NOT NULL", eventId)).map((g) => [g.bib, g]));
   const seen = new Set();
   const out = rows.slice(1).map((r, i) => {
@@ -27,9 +37,11 @@ async function preview(eventId, text) {
     else if (!reg) errors.push(`Número ${bib} não corresponde a inscrição confirmada`);
     if (seen.has(bib)) errors.push(`Número ${bib} repetido no arquivo`);
     seen.add(bib);
-    const st = STATUS_IN[norm(col(r, 'situacao'))];
+    const word = norm(col(r, 'tempo_liquido') || col(r, 'tempo_bruto')); // algumas planilhas trazem "DNF"/"DNS" no lugar do tempo
+    const st = col(r, 'situacao') ? STATUS_IN[norm(col(r, 'situacao'))] : ({ DNF: 'dnf', NC: 'dnf', DNS: 'dns', DSQ: 'dsq', DQ: 'dsq' }[word] || 'finished');
     if (!st) errors.push(`Situação inválida "${col(r, 'situacao')}" (use CONCLUIU, NAO_LARGOU, NAO_CONCLUIU ou DESCLASSIFICADO)`);
-    const gun = parseDuration(col(r, 'tempo_bruto')), net = parseDuration(col(r, 'tempo_liquido'));
+    const tm = (n) => (/^(DNF|DNS|DSQ|DQ|NC)$/i.test(col(r, n)) ? '' : col(r, n));
+    const gun = parseDuration(tm('tempo_bruto')), net = parseDuration(tm('tempo_liquido'));
     if (Number.isNaN(gun)) errors.push('Tempo bruto inválido (use hh:mm:ss)');
     if (Number.isNaN(net)) errors.push('Tempo líquido inválido (use hh:mm:ss)');
     if (st === 'finished' && !(gun > 0) && !(net > 0)) errors.push('Participante que concluiu precisa de tempo');
@@ -88,6 +100,22 @@ async function publish(versionId, status) {
     return v;
   });
 }
+/** Total de concluintes por grupo, para exibir "12º de 340". */
+async function totals(versionId) {
+  const rows = await db.all(`SELECT modality_id, gender, category_id, COUNT(*)::int n FROM results WHERE version_id=? AND status='finished' GROUP BY modality_id, gender, category_id`, versionId);
+  const t = { overall: {}, gender: {}, category: {} };
+  for (const r of rows) {
+    t.overall[r.modality_id] = (t.overall[r.modality_id] || 0) + r.n;
+    t.gender[`${r.modality_id}|${r.gender}`] = (t.gender[`${r.modality_id}|${r.gender}`] || 0) + r.n;
+    if (r.category_id) t.category[`${r.modality_id}|${r.category_id}`] = (t.category[`${r.modality_id}|${r.category_id}`] || 0) + r.n;
+  }
+  return t;
+}
+/** Posições do resultado com o total do grupo: { overall: '12º de 340', gender: ..., category: ... } */
+function placings(x, t) {
+  const f = (pos, n) => (pos ? `${pos}º de ${n || pos}` : '—');
+  return { overall: f(x.rank_overall, t.overall[x.modality_id]), gender: f(x.rank_gender, t.gender[`${x.modality_id}|${x.gender}`]), category: f(x.rank_category, t.category[`${x.modality_id}|${x.category_id}`]) };
+}
 async function currentPublished(eventId) { return await db.one("SELECT * FROM result_versions WHERE event_id=? AND status IN ('preliminary','official') ORDER BY version DESC LIMIT 1", eventId); }
 
-module.exports = { preview, rank, saveVersion, versionRows, correct, publish, currentPublished, RESULT_STATUS, TEMPLATE_CSV };
+module.exports = { totals, placings, preview, rank, saveVersion, versionRows, correct, publish, currentPublished, RESULT_STATUS, TEMPLATE_CSV };

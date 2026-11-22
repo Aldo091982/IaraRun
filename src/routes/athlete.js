@@ -6,7 +6,7 @@ const config = require('../config');
 const { html, raw, brl, fmtDate, fmtDateTime, fmtDuration, fmtPace, parseDuration, json, UserError, NotFound, nowIso, code, addMinutes } = require('../lib/util');
 const { isCpf, digits, fmtCpf, isEmail } = require('../lib/docs');
 const { counts, currentLot } = require('../lib/events');
-const { currentPublished, RESULT_STATUS } = require('../lib/results');
+const { currentPublished, totals, placings, RESULT_STATUS } = require('../lib/results');
 const { audit, recordConsent, sendMail } = require('../lib/core');
 const { requireUser, upload, checkFile, store, csrfAfterMultipart } = require('../lib/guards');
 const { ORDER_STATUS } = require('./checkout');
@@ -155,10 +155,13 @@ r.post('/inscricao/:id/servicos/revisao', async (req, res) => {
 
 // ---------- Histórico, recordes e certificados ----------
 async function history(userId) {
-  return await db.all(`SELECT res.*, e.name event_name, e.slug, e.start_utc, e.timezone, m.distance_km, m.name modality, c.name category, v.status vstatus, g.id reg_id
+  const rows = await db.all(`SELECT res.*, e.name event_name, e.slug, e.start_utc, e.timezone, m.distance_km, m.name modality, c.name category, v.status vstatus, g.id reg_id
     FROM registrations g JOIN events e ON e.id=g.event_id JOIN result_versions v ON v.event_id=e.id AND v.status IN ('preliminary','official')
     JOIN results res ON res.version_id=v.id AND res.registration_id=g.id LEFT JOIN modalities m ON m.id=res.modality_id LEFT JOIN categories c ON c.id=res.category_id
     WHERE (g.user_id=? OR (g.buyer_user_id=? AND g.cpf=(SELECT cpf FROM users WHERE id=?))) AND v.version=(SELECT MAX(version) FROM result_versions WHERE event_id=e.id AND status IN ('preliminary','official')) ORDER BY e.start_utc`, userId, userId, userId);
+  const cache = {};
+  for (const x of rows) { cache[x.version_id] ||= await totals(x.version_id); x.pl = placings(x, cache[x.version_id]); }
+  return rows;
 }
 r.get('/historico', async (req, res) => {
   const h = await history(req.user.id);
@@ -169,7 +172,7 @@ r.get('/historico', async (req, res) => {
   const maxPace = Math.max(...series.map((x) => x.t / x.d), 1), minPace = Math.min(...series.map((x) => x.t / x.d), maxPace);
   const chart = series.length >= 2 ? raw(`<svg viewBox="0 0 600 180" class="chart" role="img" aria-label="Evolução do ritmo médio (menor é melhor)"><polyline fill="none" stroke="currentColor" stroke-width="2" points="${series.map((x, i) => `${20 + (i * 560) / (series.length - 1)},${20 + ((x.t / x.d - minPace) / (maxPace - minPace || 1)) * 140}`).join(' ')}"/>${series.map((x, i) => `<circle cx="${20 + (i * 560) / (series.length - 1)}" cy="${20 + ((x.t / x.d - minPace) / (maxPace - minPace || 1)) * 140}" r="4"><title>${x.name}: ${fmtPace(x.t / x.d)}</title></circle>`).join('')}</svg>`) : '';
   res.page({ title: 'Histórico', wide: true, body: html`<h1>Histórico esportivo</h1>${accountNav('/minha-conta/historico')}
-  <section class="card"><h2>Resultados</h2>${table(['Data', 'Evento', 'Modalidade', 'Tempo', 'Ritmo', 'Geral', 'Categoria', 'Situação', 'Fonte', ''], h.map((x) => [fmtDate(x.start_utc, x.timezone), html`<a href="/e/${x.slug}/resultados">${x.event_name}</a>`, x.modality, fmtDuration(x.net_s ?? x.gun_s), fmtPace(x.pace_s_km), x.rank_overall ?? '—', x.rank_category ? `${x.rank_category}º ${x.category}` : '—', RESULT_STATUS[x.status], badge(x.vstatus === 'official' ? 'Oficial' : 'Preliminar', x.vstatus === 'official' ? 'ok' : 'warn'), html`<a href="/minha-conta/certificado/${x.reg_id}">Certificado</a>`]), { emptyMsg: 'Nenhum resultado oficial ainda.' })}</section>
+  <section class="card"><h2>Resultados</h2>${table(['Data', 'Evento', 'Modalidade', 'Tempo', 'Ritmo', 'Geral', 'Sexo', 'Categoria', 'Situação', 'Fonte', ''], h.map((x) => [fmtDate(x.start_utc, x.timezone), html`<a href="/e/${x.slug}/resultados">${x.event_name}</a>`, x.modality, fmtDuration(x.net_s ?? x.gun_s), fmtPace(x.pace_s_km), html`<strong>${x.pl.overall}</strong>`, x.pl.gender, x.rank_category ? `${x.category}: ${x.pl.category}` : '—', RESULT_STATUS[x.status], badge(x.vstatus === 'official' ? 'Oficial' : 'Preliminar', x.vstatus === 'official' ? 'ok' : 'warn'), html`<a href="/minha-conta/certificado/${x.reg_id}">Certificado</a>`]), { emptyMsg: 'Nenhum resultado oficial ainda.' })}</section>
   <section class="card"><h2>Recordes pessoais por distância</h2>${table(['Distância', 'Melhor tempo', 'Ritmo', 'Prova', 'Fonte'], prs.map((x) => [`${x.d} km`, fmtDuration(x.t), fmtPace(x.t / x.d), x.name, x.src === 'Registro pessoal' ? badge(x.src, 'info') : badge(x.src, 'ok')]))}
   ${chart ? html`<h3>Evolução do ritmo (todas as distâncias)</h3>${chart}<p class="muted">Comparação por ritmo médio entre distâncias; quanto mais baixo o ponto, mais rápido.</p>` : ''}</section>
   <section class="card"><h2>Registros pessoais</h2><p class="muted">Provas fora da plataforma. São exibidos como "registro pessoal", nunca como resultado oficial.</p>
@@ -188,7 +191,7 @@ r.get('/certificado/:regId', async (req, res) => {
   const done = x.status === 'finished';
   res.page({ title: 'Certificado', body: html`<article class="certificate"><p class="muted">${x.vstatus === 'official' ? 'Resultado oficial' : 'Resultado preliminar'}</p><h1>Certificado de ${done ? 'conclusão' : 'participação'}</h1>
   <p class="lead">Certificamos que <strong>${x.name}</strong> ${done ? 'concluiu' : 'participou de'} <strong>${x.event_name}</strong>, na modalidade ${x.modality}, em ${fmtDate(x.start_utc, x.timezone)}.</p>
-  ${done ? html`<p>Tempo líquido: <strong>${fmtDuration(x.net_s)}</strong> · Tempo bruto: ${fmtDuration(x.gun_s)} · Ritmo: ${fmtPace(x.pace_s_km)}</p><p>Classificação geral: ${x.rank_overall}º · Categoria ${x.category || '—'}: ${x.rank_category ?? '—'}º</p>` : html`<p>Situação: ${RESULT_STATUS[x.status]}</p>`}
+  ${done ? html`<p>Tempo líquido: <strong>${fmtDuration(x.net_s)}</strong> · Tempo bruto: ${fmtDuration(x.gun_s)} · Ritmo: ${fmtPace(x.pace_s_km)}</p><p>Classificação geral: <strong>${x.pl.overall}</strong> · ${x.gender === 'F' ? 'Feminino' : 'Masculino'}: ${x.pl.gender} · Categoria ${x.category || '—'}: ${x.pl.category}</p>` : html`<p>Situação: ${RESULT_STATUS[x.status]}</p>`}
   <p class="muted">Dados conforme resultado importado pelo organizador. Código de verificação: ${x.reg_id}-${x.version_id}</p><button class="btn" data-print>Imprimir / salvar em PDF</button></article>` });
 });
 

@@ -4,7 +4,7 @@ const db = require('../db');
 const config = require('../config');
 const { html, raw, brl, fmtDate, fmtDateTime, fmtTime, tzLabel, UF, NotFound, fmtDuration, fmtPace, json, someAsync, filterAsync } = require('../lib/util');
 const { publicStatus, PUBLIC_STATUS, currentLot, counts } = require('../lib/events');
-const { currentPublished, versionRows, RESULT_STATUS } = require('../lib/results');
+const { currentPublished, versionRows, totals, placings, RESULT_STATUS } = require('../lib/results');
 const { settings } = require('../lib/core');
 const { page, csrf, badge, field, empty, APP_NAME } = require('../views/layout');
 const { requireUser } = require('../lib/guards');
@@ -183,14 +183,23 @@ r.get('/e/:slug/resultados', async (req, res) => {
   const mods = await db.all('SELECT * FROM modalities WHERE event_id=? ORDER BY sort,id', ev.id);
   const mod = Number(req.query.modalidade) || mods[0]?.id;
   const rows = v ? (await versionRows(v.id)).filter((x) => x.modality_id === mod) : [];
+  const tot = v ? await totals(v.id) : null;
+  const sexo = ['F', 'M'].includes(req.query.sexo) ? req.query.sexo : '';
+  const cats = [...new Map(rows.filter((x) => x.category_id).map((x) => [x.category_id, x.category_name])).entries()];
+  const cat = Number(req.query.categoria) || 0;
   const hidden = new Set((await db.all('SELECT g.bib FROM registrations g JOIN users u ON u.id=g.user_id WHERE g.event_id=? AND u.public_results=0', ev.id)).map((x) => x.bib));
   const q = String(req.query.q || '').toLowerCase();
-  const list = rows.filter((x) => !q || x.bib === q || x.name.toLowerCase().includes(q));
+  const list = rows.filter((x) => (!q || x.bib === q || x.name.toLowerCase().includes(q)) && (!sexo || x.gender === sexo) && (!cat || x.category_id === cat));
+  const posKey = cat ? 'rank_category' : sexo ? 'rank_gender' : 'rank_overall';
+  const pname = (x) => (hidden.has(x.bib) ? 'Atleta (perfil privado)' : x.name);
+  const podiumFor = (g) => rows.filter((x) => x.status === 'finished' && (g ? x.gender === g && x.rank_gender <= 3 : x.rank_overall <= 3)).sort((a, b) => (g ? a.rank_gender - b.rank_gender : a.rank_overall - b.rank_overall));
   res.page({ title: `Resultados — ${ev.name}`, wide: true, body: html`<h1>Resultados — ${ev.name}</h1>
   ${!v ? empty('Resultados ainda não publicados.') : html`<p>${badge(v.status === 'official' ? 'Resultado oficial' : 'Resultado preliminar', v.status === 'official' ? 'ok' : 'warn')} Versão ${v.version} publicada em ${fmtDateTime(v.published_at, ev.timezone)}. ${v.status === 'preliminary' ? 'Pode sofrer correções após o prazo de revisão.' : ''}</p>
-  <form class="filters inline-filters">${field('modalidade', 'Modalidade', { value: mod, options: mods.map((m) => [m.id, m.name]) })}${field('q', 'Nome ou número', { value: req.query.q })}<button class="btn">Filtrar</button></form>
-  <div class="table-wrap"><table><thead><tr><th>Pos.</th><th>Nº</th><th>Atleta</th><th>Categoria</th><th>Pos. cat.</th><th>Tempo líquido</th><th>Tempo bruto</th><th>Ritmo</th><th>Situação</th></tr></thead><tbody>
-  ${list.map((x) => html`<tr><td>${x.rank_overall ?? '—'}</td><td>${x.bib}</td><td>${hidden.has(x.bib) ? 'Atleta (perfil privado)' : x.name}</td><td>${x.category_name || '—'}</td><td>${x.rank_category ?? '—'}</td><td>${fmtDuration(x.net_s)}</td><td>${fmtDuration(x.gun_s)}</td><td>${fmtPace(x.pace_s_km)}</td><td>${RESULT_STATUS[x.status]}</td></tr>`)}
+  <div class="podiums">${[['', 'Geral'], ['F', 'Feminino'], ['M', 'Masculino']].map(([g, label]) => { const pd = podiumFor(g); return pd.length ? html`<section class="card podium"><h2>Pódio ${label}</h2><ol>${pd.map((x) => { const pos = g ? x.rank_gender : x.rank_overall; return html`<li><span class="medal medal-${pos}">${pos}º</span> <strong>${pname(x)}</strong> <span class="muted">${fmtDuration(x.net_s ?? x.gun_s)}</span></li>`; })}</ol></section>` : ''; })}</div>
+  <form class="filters inline-filters">${field('modalidade', 'Modalidade', { value: mod, options: mods.map((m) => [m.id, m.name]) })}${field('sexo', 'Sexo', { value: sexo, options: [['', 'Todos'], ['F', 'Feminino'], ['M', 'Masculino']] })}${cats.length ? field('categoria', 'Categoria', { value: cat || '', options: [['', 'Todas'], ...cats] }) : ''}${field('q', 'Nome ou número', { value: req.query.q })}<button class="btn">Filtrar</button></form>
+  <p class="muted">${list.length} atleta(s). A coluna "Pos." mostra a posição ${cat ? 'na categoria' : sexo ? 'no sexo escolhido' : 'geral'}.</p>
+  <div class="table-wrap"><table><thead><tr><th>Pos.</th><th>Nº</th><th>Atleta</th><th>Geral</th><th>Sexo</th><th>Categoria</th><th>Tempo líquido</th><th>Tempo bruto</th><th>Ritmo</th><th>Situação</th></tr></thead><tbody>
+  ${list.sort((a, b) => (a[posKey] ?? 1e9) - (b[posKey] ?? 1e9) || Number(a.bib) - Number(b.bib)).map((x) => { const pl = placings(x, tot); return html`<tr><td><strong>${x[posKey] ? `${x[posKey]}º` : '—'}</strong></td><td>${x.bib}</td><td>${pname(x)}</td><td>${pl.overall}</td><td>${x.gender || '—'} · ${pl.gender}</td><td>${x.category_name || '—'} · ${pl.category}</td><td>${fmtDuration(x.net_s)}</td><td>${fmtDuration(x.gun_s)}</td><td>${fmtPace(x.pace_s_km)}</td><td>${RESULT_STATUS[x.status]}</td></tr>`; })}
   </tbody></table></div>`}` });
 });
 
