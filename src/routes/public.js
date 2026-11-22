@@ -36,14 +36,45 @@ function searchPanel(q = {}) {
     <div class="sp-actions"><button class="btn">Buscar</button><a class="btn btn-outline" href="/eventos">Limpar</a></div></form>`;
 }
 
+/**
+ * Números públicos da plataforma, calculados do banco (dados de demonstração não contam).
+ * Guardados por 5 minutos para não pesar na página inicial.
+ */
+let statsCache = { at: 0, value: null };
+async function platformStats() {
+  if (statsCache.value && Date.now() - statsCache.at < 5 * 60000) return statsCache.value;
+  const now = new Date().toISOString();
+  const v = await db.one(`SELECT
+    (SELECT COUNT(*) FROM events WHERE is_demo=0 AND status IN ('published','closed','completed') AND start_utc < ?) events_done,
+    (SELECT COUNT(*) FROM organizations WHERE is_demo=0 AND status='active') organizers,
+    (SELECT COUNT(*) FROM users WHERE is_demo=0 AND status='active') athletes,
+    (SELECT COUNT(*) FROM registrations g JOIN events e ON e.id=g.event_id WHERE e.is_demo=0 AND g.status='confirmed') registrations`, now);
+  statsCache = { at: Date.now(), value: v };
+  return v;
+}
+platformStats.reset = () => { statsCache = { at: 0, value: null }; };
+const fmtInt = (n) => Number(n || 0).toLocaleString('pt-BR');
+
+function statsSection(s) {
+  const items = [[s.events_done, 'Eventos realizados'], [s.organizers, 'Organizadores'], [s.athletes, 'Atletas cadastrados'], [s.registrations, 'Inscrições realizadas']];
+  if (!items.some(([n]) => n > 0)) return ''; // plataforma recém-aberta: a seção aparece com o primeiro número
+  return html`<section class="stats-band" aria-labelledby="stats-title">
+    <h2 id="stats-title">Nossa história em números</h2>
+    <p>Cada prova realizada, cada organizador e cada atleta que cruza a linha de chegada aumenta esses números.</p>
+    <div class="stats-grid">${items.map(([n, label]) => html`<div class="stat"><strong data-count="${n}">${n > 0 ? '+' : ''}${fmtInt(n)}</strong><span>${label}</span></div>`)}</div>
+  </section>`;
+}
+
 r.get('/', async (req, res) => {
   const evs = await db.all("SELECT * FROM events WHERE status='published' AND start_utc > ? ORDER BY start_utc LIMIT 12", new Date().toISOString());
+  const stats = await platformStats();
   res.page({ title: null, description: 'Encontre corridas e eventos esportivos, inscreva-se e acompanhe seus resultados.', body: html`
   <section class="hero"><div class="hero-figure" aria-hidden="true">${raw(art('run'))}</div><div class="hero-in"><h1>Sua próxima largada começa aqui</h1><p>Provas de corrida, ciclismo, triathlon e trail com inscrições abertas. Escolha a sua e vá além do seu limite.</p></div></section>
   ${searchPanel()}
   <nav class="sport-strip" aria-label="Modalidades">${[['run', 'Corrida', 'Corrida de rua'], ['trail', 'Trail', 'Trail'], ['bike', 'Ciclismo', 'Ciclismo'], ['swim', 'Triathlon', 'Triathlon'], ['medal', 'Resultados', null]].map(([k, l, m]) => html`<a class="sport-chip" href="${m ? `/eventos?modalidade=${encodeURIComponent(m)}` : '/minha-conta/historico'}"><span class="chip-art" aria-hidden="true">${raw(art(k))}</span>${l}</a>`)}</nav>
   <section><div class="section-head"><h2>Próximos eventos</h2><a href="/eventos">Ver todos</a></div>
   <div class="grid grid-events">${evs.length ? await Promise.all(evs.map(eventCard)) : empty('Nenhum evento publicado ainda.')}</div></section>
+  ${statsSection(stats)}
   <section class="org-strip"><div><h2>Organiza eventos?</h2><p>Cadastre sua empresa e publique sua prova sozinho, em poucos passos.</p></div><a class="btn btn-lg" href="/organizadores">Quero organizar</a></section>` });
 });
 
@@ -186,3 +217,4 @@ r.get('/organizadores', async (req, res) => {
 });
 module.exports = r;
 module.exports.loadPublicEvent = loadPublicEvent;
+module.exports.platformStats = platformStats;

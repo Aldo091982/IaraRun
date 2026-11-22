@@ -81,6 +81,21 @@
   window.addEventListener('appinstalled', () => { if (banner) banner.hidden = true; installBtns.forEach((x) => { x.hidden = true; }); });
   if (standalone) document.documentElement.classList.add('is-app');
 
+  // Números da plataforma: sobem até o valor quando aparecem na tela (o valor final já vem no HTML)
+  const counters = $$('[data-count]');
+  if (counters.length && 'IntersectionObserver' in window && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const fmt = (n) => n.toLocaleString('pt-BR');
+    const io = new IntersectionObserver((entries) => entries.forEach((en) => {
+      if (!en.isIntersecting) return;
+      io.unobserve(en.target);
+      const el = en.target; const end = Number(el.dataset.count) || 0; if (end < 2) return;
+      const t0 = performance.now(); const dur = 1200;
+      const step = (t) => { const k = Math.min(1, (t - t0) / dur); const v = Math.round(end * (1 - Math.pow(1 - k, 3))); el.textContent = `+${fmt(v)}`; if (k < 1) requestAnimationFrame(step); };
+      requestAnimationFrame(step);
+    }), { threshold: 0.4 });
+    counters.forEach((el) => io.observe(el));
+  }
+
   // Contagem regressiva da reserva
   $$('[data-countdown]').forEach((el) => {
     const end = new Date(el.dataset.countdown).getTime();

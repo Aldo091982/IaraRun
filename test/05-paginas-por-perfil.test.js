@@ -42,3 +42,30 @@ test('telas da administração', async () => {
   const org = await db.one("SELECT id FROM organizations WHERE cnpj='11222333000181'");
   await crawl(c, ['/admin', '/admin/organizadores', `/admin/organizadores/${org.id}`, '/admin/usuarios', '/admin/eventos', '/admin/suporte', '/admin/parametros', '/admin/integracoes', '/admin/auditoria', '/dev/caixa-de-saida']);
 });
+
+test('números da página inicial contam dados reais e ignoram a demonstração', async () => {
+  const { platformStats } = require('../src/routes/public');
+  platformStats.reset();
+  const before = await platformStats();
+  // um organizador ativo e um evento já realizado com uma inscrição confirmada
+  const u = Number((await db.run("INSERT INTO users(email,name,password_hash) VALUES('numeros@teste.local','Números','x')")).lastInsertRowid);
+  const org = Number((await db.run("INSERT INTO organizations(cnpj,legal_name,status) VALUES('99888777000155','Org Números','active')")).lastInsertRowid);
+  const ev = Number((await db.run("INSERT INTO events(org_id,slug,name,status,start_utc) VALUES(?, 'numeros-passado', 'Prova Passada', 'completed', '2020-01-01T10:00:00Z')", org)).lastInsertRowid);
+  const mod = Number((await db.run("INSERT INTO modalities(event_id,name) VALUES(?, '5 km')", ev)).lastInsertRowid);
+  const ord = Number((await db.run("INSERT INTO orders(code,user_id,event_id,status) VALUES('PNUM1',?,?,'free')", u, ev)).lastInsertRowid);
+  await db.run("INSERT INTO registrations(order_id,event_id,modality_id,buyer_user_id,name,status,qr_token) VALUES(?,?,?,?,'Atleta','confirmed','qr-numeros-1')", ord, ev, mod, u);
+  // dados de demonstração não entram
+  const demoOrg = Number((await db.run("INSERT INTO organizations(cnpj,legal_name,status,is_demo) VALUES('99888777000156','Demo','active',1)")).lastInsertRowid);
+  await db.run("INSERT INTO events(org_id,slug,name,status,start_utc,is_demo) VALUES(?, 'numeros-demo', 'Demo', 'completed', '2020-01-01T10:00:00Z', 1)", demoOrg);
+  await db.run("INSERT INTO users(email,name,password_hash,is_demo) VALUES('demo-numeros@demo.invalid','Demo','x',1)");
+  platformStats.reset();
+  const after = await platformStats();
+  assert.equal(after.events_done - before.events_done, 1);
+  assert.equal(after.organizers - before.organizers, 1);
+  assert.equal(after.athletes - before.athletes, 1);
+  assert.equal(after.registrations - before.registrations, 1);
+  platformStats.reset();
+  const home = await new h.Client().get('/');
+  assert.match(home.text, /Nossa história em números/);
+  assert.match(home.text, /Inscrições realizadas/);
+});
