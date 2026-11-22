@@ -183,6 +183,7 @@ async function confirmOrder(orderId, { free = false } = {}) {
     const u = await db.one('SELECT * FROM users WHERE id=?', o.user_id);
     const ev = await db.one('SELECT name FROM events WHERE id=?', o.event_id);
     await sendMail(u.email, `Inscrição confirmada — ${ev.name}`, `Olá, ${u.name}! Seu pedido ${o.code} foi confirmado${free ? ' (evento gratuito)' : ' após validação do pagamento'}. Acesse Minhas inscrições para ver o comprovante e o QR Code de retirada do kit.`);
+    await require('./delivery').queueUserMessage(u.id, `${ev.name}: inscrição confirmada (pedido ${o.code}). Comprovante e QR Code do kit em ${require('../config').baseUrl}/minha-conta`);
     await audit(null, 'order.confirmed', { entity: 'order', entityId: o.id, userId: o.user_id, detail: { free, late: !!late } });
     return { ok: true };
   });

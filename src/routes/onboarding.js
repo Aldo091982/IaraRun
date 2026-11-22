@@ -3,7 +3,7 @@ const express = require('express');
 const db = require('../db');
 const config = require('../config');
 const { html, json, UserError, nowIso } = require('../lib/util');
-const { isCnpj, digits, fmtCnpj, isEmail, isPhone, isUrl } = require('../lib/docs');
+const { isCnpj, isCpf, digits, fmtCnpj, fmtCpf, isEmail, isPhone, isUrl, orgDoc } = require('../lib/docs');
 const cnpjProvider = require('../lib/cnpjProvider');
 const { audit, LEGAL, recordConsent, hasConsent, sendMail, settings } = require('../lib/core');
 const { refreshStatus, ownerOf } = require('../lib/orgs');
@@ -41,35 +41,40 @@ async function render(req, res, step, { errors = [], fieldErr = {}, notice, look
   let body;
   if (step === 1) {
     body = html`<h2>Bem-vindo(a)! Vamos começar.</h2>
-    <p>Nesta versão, o cadastro de organizadores é feito com <strong>CNPJ</strong> — incluindo <strong>MEI</strong>. Você levará cerca de 10 minutos e pode parar e retomar quando quiser: o progresso fica salvo na sua conta.</p>
+    <p>Você pode organizar eventos como <strong>empresa</strong> (CNPJ, incluindo <strong>MEI</strong>) ou como <strong>pessoa física</strong> (CPF). Você levará cerca de 10 minutos e pode parar e retomar quando quiser: o progresso fica salvo na sua conta.</p>
     <ul class="checklist"><li>Conta do responsável: <strong>${req.user.name}</strong> (${req.user.email}) ${req.user.email_verified_at ? badge('E-mail confirmado', 'ok') : badge('E-mail pendente', 'warn')}</li>
-    <li>Tenha em mãos: CNPJ, logomarca, documento oficial com foto e comprovação de vínculo com a empresa.</li></ul>
+    <li>Tenha em mãos: CNPJ ou CPF, logomarca (opcional para pessoa física), documento oficial com foto e, para empresas, a comprovação de vínculo.</li></ul>
     ${req.user.email_verified_at ? '' : html`<div class="alert alert-warn">Confirme seu e-mail pelo link enviado. Você pode continuar o cadastro enquanto isso. <form method="post" action="/reenviar-confirmacao" class="inline">${csrf(req)}<button class="linklike">Reenviar link</button></form></div>`}
     <p class="muted">Não é você? <a href="/entrar?volta=/organizador/cadastro">Entrar com outra conta</a>. Esta conta continuará valendo para inscrições como atleta.</p>
     <form method="post" action="/organizador/cadastro/1">${csrf(req)}${nav(1, { next: 'Começar' })}</form>`;
   } else if (step === 2) {
-    const v = { ...(org || {}), ...(lookup?.data || {}), ...json(org?.address, {}), ...(lookup?.data?.address || {}), ...d.data, ...(req.body?.cnpj ? req.body : {}) };
+    const v = { ...(org || {}), ...(lookup?.data || {}), ...json(org?.address, {}), ...(lookup?.data?.address || {}), ...d.data, ...(req.body?.cnpj || req.body?.cpf || req.body?.person_type ? req.body : {}) };
+    const pt = v.person_type === 'pf' ? 'pf' : 'pj';
     const fromProvider = (lookup?.ok) || (org && org.cnpj_source.startsWith('provider:'));
     const docs = await docsOf(org?.id);
     const s = await settings();
-    body = html`<h2>Empresa e documentação</h2>
+    body = html`<h2>Organizador e documentação</h2>
     ${errorsBox(errors)}${notice || ''}
-    <form method="post" action="/organizador/cadastro/2" enctype="multipart/form-data" novalidate>${csrf(req)}
-    <fieldset><legend>CNPJ</legend><div class="row">${field('cnpj', 'CNPJ da empresa ou MEI', { value: v.cnpj ? fmtCnpj(v.cnpj) : '', required: true, error: fieldErr.cnpj, attrs: 'inputmode="numeric" data-mask="cnpj"', hint: 'Somente números ou com pontuação.' })}
+    <form method="post" action="/organizador/cadastro/2" enctype="multipart/form-data" novalidate data-person-form>${csrf(req)}
+    <fieldset class="person-type"><legend>Você vai organizar eventos como</legend>
+      <label class="choice"><input type="radio" name="person_type" value="pj" ${pt === 'pj' ? 'checked' : ''}><span><strong>Empresa</strong><small>CNPJ, incluindo MEI</small></span></label>
+      <label class="choice"><input type="radio" name="person_type" value="pf" ${pt === 'pf' ? 'checked' : ''}><span><strong>Pessoa física</strong><small>CPF</small></span></label></fieldset>
+    <fieldset class="only-pf"><legend>CPF</legend>${field('cpf', 'CPF do organizador', { value: v.cpf ? fmtCpf(v.cpf) : '', error: fieldErr.cpf, attrs: 'inputmode="numeric" data-mask="cpf"', hint: 'Somente números ou com pontuação. Não aparece para os atletas.' })}</fieldset>
+    <fieldset class="only-pj"><legend>CNPJ</legend><div class="row">${field('cnpj', 'CNPJ da empresa ou MEI', { value: v.cnpj ? fmtCnpj(v.cnpj) : '', error: fieldErr.cnpj, attrs: 'inputmode="numeric" data-mask="cnpj"', hint: 'Somente números ou com pontuação.' })}
       <button class="btn btn-ghost" name="acao" value="buscar" formnovalidate>Buscar empresa</button></div>
       ${config.cnpj.provider ? tip(`Consulta cadastral realizada pelo fornecedor de dados: ${config.cnpj.name}. Não é uma validação direta junto à Receita Federal.`) : tip('Consulta cadastral automática não configurada neste ambiente: preencha os dados manualmente. Eles ficarão como "pendente de verificação" até a análise da equipe.')}</fieldset>
-    <fieldset><legend>Dados da empresa ${fromProvider ? badge('Preenchido pela consulta cadastral', 'info') : badge('Preenchimento manual — pendente de verificação', 'warn')}</legend>
-      ${field('legal_name', 'Razão social', { value: v.legal_name, required: true, error: fieldErr.legal_name })}
-      ${field('trade_name', 'Nome fantasia (exibido aos atletas)', { value: v.trade_name, required: true, error: fieldErr.trade_name })}
+    <fieldset><legend><span class="only-pj">Dados da empresa</span><span class="only-pf">Seus dados</span> ${fromProvider && pt === 'pj' ? badge('Preenchido pela consulta cadastral', 'info') : badge('Preenchimento manual — pendente de verificação', 'warn')}</legend>
+      ${field('legal_name', pt === 'pf' ? 'Nome completo' : 'Razão social', { value: v.legal_name, required: true, error: fieldErr.legal_name, attrs: 'data-label-pj="Razão social" data-label-pf="Nome completo"' })}
+      ${field('trade_name', 'Nome exibido aos atletas', { value: v.trade_name, required: true, error: fieldErr.trade_name, hint: 'Nome fantasia da empresa, ou o nome pelo qual você é conhecido como organizador.' })}
       ${fromProvider ? html`<p>Situação cadastral: <strong>${v.cnpj_status || 'não informada'}</strong></p>` : ''}
       <div class="row">${field('zip', 'CEP', { value: v.zip })}${field('street', 'Logradouro', { value: v.street })}${field('number', 'Número', { value: v.number })}</div>
       <div class="row">${field('district', 'Bairro', { value: v.district })}${field('city', 'Cidade', { value: v.city, required: true, error: fieldErr.city })}${field('state', 'UF', { value: v.state, required: true, error: fieldErr.state, options: [['', '—'], ...require('../lib/util').UF] })}</div></fieldset>
     <fieldset><legend>Logomarca</legend>${org?.logo_path ? html`<img src="/media/${org.logo_path}" alt="Logomarca atual" class="org-logo">` : ''}
       <div class="field"><label for="logo">Arquivo da logomarca</label><input type="file" id="logo" name="logo" accept="image/png,image/jpeg,image/webp" data-preview="logo-prev" aria-describedby="logo-hint"><small id="logo-hint" class="hint">PNG, JPG ou WEBP até 2 MB. Recomendado: quadrada, mínimo 400×400 px, fundo transparente ou branco.</small><img id="logo-prev" class="org-logo" alt="Prévia da logomarca" hidden></div></fieldset>
-    <fieldset><legend>Responsável e vínculo com a empresa</legend>
-      ${field('link_role', 'Seu vínculo com a empresa', { value: v.link_role, options: LINK_ROLES, required: true, error: fieldErr.link_role })}
+    <fieldset><legend>Responsável<span class="only-pj"> e vínculo com a empresa</span></legend>
+      <div class="only-pj">${field('link_role', 'Seu vínculo com a empresa', { value: v.link_role, options: LINK_ROLES, error: fieldErr.link_role })}</div>
       <div class="field"><label for="identity">Documento oficial com foto do responsável${s.require_identity_document ? ' *' : ''}</label><input type="file" id="identity" name="identity" accept="application/pdf,image/png,image/jpeg"><small class="hint">RG, CNH ou passaporte. PDF, JPG ou PNG até 5 MB. Armazenado em área privada, acessível apenas à equipe de verificação.</small>${fieldErr.identity ? html`<small class="err">${fieldErr.identity}</small>` : ''}</div>
-      <div class="field"><label for="link_doc">Comprovante de vínculo (contrato social, certificado MEI ou procuração)</label><input type="file" id="link_doc" name="link_doc" accept="application/pdf,image/png,image/jpeg"><small class="hint">PDF, JPG ou PNG até 5 MB.</small></div>
+      <div class="field only-pj"><label for="link_doc">Comprovante de vínculo (contrato social, certificado MEI ou procuração)</label><input type="file" id="link_doc" name="link_doc" accept="application/pdf,image/png,image/jpeg"><small class="hint">PDF, JPG ou PNG até 5 MB.</small></div>
       ${docs.length ? html`<ul class="doc-list">${docs.map((x) => html`<li>${x.kind === 'identity' ? 'Documento do responsável' : 'Comprovante de vínculo'} — ${x.original_name} ${badge(...DOC_STATUS[x.status])}</li>`)}</ul><p class="muted">"Enviado" não significa identidade verificada: a verificação é feita pela equipe da plataforma.</p>` : ''}
     </fieldset>${nav(2)}</form>`;
   } else if (step === 3) {
@@ -95,7 +100,7 @@ async function render(req, res, step, { errors = [], fieldErr = {}, notice, look
     body = html`<h2>Revisão e conclusão</h2>${errorsBox(errors.length ? errors : problems.length ? problems.map((p) => p.msg) : [])}
     <dl class="review">
       <dt>Responsável</dt><dd>${req.user.name} — ${req.user.email} ${req.user.email_verified_at ? badge('confirmado', 'ok') : badge('e-mail pendente', 'warn')} <a href="/minha-conta/perfil">editar</a></dd>
-      <dt>Empresa</dt><dd>${org ? html`${org.trade_name} (${org.legal_name}) — CNPJ ${fmtCnpj(org.cnpj)}<br>${addr.street || ''} ${addr.number || ''} ${addr.district || ''} ${addr.city}/${addr.state}<br>Origem dos dados: ${org.cnpj_source === 'manual' ? 'preenchimento manual (pendente de verificação)' : org.cnpj_source.replace('provider:', 'consulta cadastral — ')}` : 'não informada'} <a href="/organizador/cadastro?etapa=2">editar</a></dd>
+      <dt>${org?.person_type === 'pf' ? 'Organizador' : 'Empresa'}</dt><dd>${org ? html`${org.trade_name} (${org.legal_name}) — ${orgDoc(org)}<br>${addr.street || ''} ${addr.number || ''} ${addr.district || ''} ${addr.city}/${addr.state}<br>Origem dos dados: ${org.cnpj_source === 'manual' ? 'preenchimento manual (pendente de verificação)' : org.cnpj_source.replace('provider:', 'consulta cadastral — ')}` : 'não informada'} <a href="/organizador/cadastro?etapa=2">editar</a></dd>
       <dt>Documentos</dt><dd>${docs.length ? docs.map((x) => html`${x.kind === 'identity' ? 'Documento do responsável' : 'Comprovante de vínculo'}: ${DOC_STATUS[x.status][0]}<br>`) : 'nenhum enviado'} <a href="/organizador/cadastro?etapa=2">editar</a></dd>
       <dt>Atendimento</dt><dd>${org?.support_email || '—'} · ${org?.support_phone || '—'}${org?.website ? html` · ${org.website}` : ''} <a href="/organizador/cadastro?etapa=3">editar</a></dd>
       <dt>Aceites</dt><dd>${await Promise.all(['terms', 'privacy', 'organizer'].map(async (k) => html`${LEGAL[k].title}: ${await hasConsent(req.user.id, k) ? 'aceito' : 'pendente'}<br>`))}</dd></dl>
@@ -108,9 +113,9 @@ async function render(req, res, step, { errors = [], fieldErr = {}, notice, look
 async function completeness(user, org, d) {
   const p = [];
   if (!org) { p.push({ msg: 'Informe e salve os dados da empresa (etapa 2).' }); return p; }
-  if (!org.legal_name || !org.trade_name) p.push({ msg: 'Razão social e nome fantasia (etapa 2).' });
+  if (!org.legal_name || !org.trade_name) p.push({ msg: org.person_type === 'pf' ? 'Nome completo e nome exibido (etapa 2).' : 'Razão social e nome fantasia (etapa 2).' });
   if (!json(org.address, {}).city) p.push({ msg: 'Cidade e UF da empresa (etapa 2).' });
-  if (!d.data.link_role) p.push({ msg: 'Seu vínculo com a empresa (etapa 2).' });
+  if (org.person_type !== 'pf' && !d.data.link_role) p.push({ msg: 'Seu vínculo com a empresa (etapa 2).' });
   if ((await settings()).require_identity_document && !await db.one("SELECT 1 FROM documents WHERE org_id=? AND kind='identity'", org.id)) p.push({ msg: 'Documento oficial do responsável (etapa 2).' });
   if (!isEmail(org.support_email) || !isPhone(org.support_phone)) p.push({ msg: 'E-mail e telefone de atendimento (etapa 3).' });
   for (const k of ['terms', 'privacy', 'organizer']) if (!await hasConsent(user.id, k)) p.push({ msg: `Aceite: ${LEGAL[k].title} (etapa 3).` });
@@ -136,31 +141,34 @@ r.post('/cadastro/1', async (req, res) => { if (!req.user) return res.redirect(3
 r.post('/cadastro/2', upload(5).fields([{ name: 'logo', maxCount: 1 }, { name: 'identity', maxCount: 1 }, { name: 'link_doc', maxCount: 1 }]), csrfAfterMultipart, async (req, res) => {
   if (!req.user) return res.redirect(303, '/entrar');
   const b = req.body; const d = await draft(req.user.id);
-  const cnpj = digits(b.cnpj);
+  const personType = b.person_type === 'pf' ? 'pf' : 'pj';
+  const cnpj = personType === 'pj' ? digits(b.cnpj) : null;
+  const cpf = personType === 'pf' ? digits(b.cpf) : null;
   let org = d.org_id ? await db.one('SELECT * FROM organizations WHERE id=?', d.org_id) : null;
-  if (!isCnpj(cnpj)) return render(req, res, 2, { errors: ['CNPJ inválido. Confira os 14 dígitos.'], fieldErr: { cnpj: 'CNPJ inválido' } });
-  const existing = await db.one('SELECT * FROM organizations WHERE cnpj=?', cnpj);
+  if (personType === 'pj' && !isCnpj(cnpj)) return render(req, res, 2, { errors: ['CNPJ inválido. Confira os 14 dígitos.'], fieldErr: { cnpj: 'CNPJ inválido' } });
+  if (personType === 'pf' && !isCpf(cpf)) return render(req, res, 2, { errors: ['CPF inválido. Confira os 11 dígitos.'], fieldErr: { cpf: 'CPF inválido' } });
+  const existing = personType === 'pj' ? await db.one('SELECT * FROM organizations WHERE cnpj=?', cnpj) : await db.one('SELECT * FROM organizations WHERE cpf=?', cpf);
   if (existing && existing.id !== org?.id) {
     const isMember = await db.one('SELECT 1 FROM org_members WHERE org_id=? AND user_id=?', existing.id, req.user.id);
     if (isMember) return res.redirect(303, `/contexto/org:${existing.id}?volta=/organizador`);
     const pending = await db.one("SELECT * FROM org_access_requests WHERE org_id=? AND user_id=? AND status='pending'", existing.id, req.user.id);
-    return render(req, res, 2, { errors: ['Esta empresa já está cadastrada na plataforma. Por segurança, não é possível assumir a conta apenas com o CNPJ.'],
+    return render(req, res, 2, { errors: [personType === 'pf' ? 'Já existe um organizador cadastrado com este CPF. Por segurança, não é possível assumir a conta apenas com o CPF.' : 'Esta empresa já está cadastrada na plataforma. Por segurança, não é possível assumir a conta apenas com o CNPJ.'],
       notice: html`<div class="card callout"><h3>Solicitar acesso à empresa já cadastrada</h3>${pending ? html`<p>${badge('Solicitação enviada', 'info')} Aguarde a aprovação do responsável atual ou da equipe da plataforma.</p>` : html`<p>Enviaremos sua solicitação ao responsável atual e à equipe de verificação, que confirmarão seu vínculo.</p>
       <form method="post" action="/organizador/cadastro/solicitar-acesso">${csrf(req)}<input type="hidden" name="org_id" value="${existing.id}">${field('message', 'Explique seu vínculo com a empresa', { type: 'textarea', required: true })}<button class="btn">Solicitar acesso</button></form>`}</div>` });
   }
-  if (b.acao === 'buscar') {
+  if (b.acao === 'buscar' && personType === 'pj') {
     const lk = await cnpjProvider.lookup(cnpj);
     const notice = lk.ok ? html`<div class="alert alert-success">Empresa encontrada. Confira os dados abaixo antes de avançar.</div>` : html`<div class="alert alert-${lk.error === 'invalid' ? 'error' : 'warn'}">${lk.message}</div>`;
     if (lk.ok) await saveDraft(req.user.id, { data: { lookup: { ...lk.data, source: lk.source, cnpj, at: nowIso() } } });
     return render(req, res, 2, { notice, lookup: lk });
   }
   const errors = [], fieldErr = {};
-  const lookupData = d.data.lookup?.cnpj === cnpj ? d.data.lookup : null;
+  const lookupData = personType === 'pj' && d.data.lookup?.cnpj === cnpj ? d.data.lookup : null;
   if (!b.legal_name?.trim()) fieldErr.legal_name = 'Obrigatório';
   if (!b.trade_name?.trim()) fieldErr.trade_name = 'Obrigatório';
   if (!b.city?.trim()) fieldErr.city = 'Obrigatório';
   if (!b.state) fieldErr.state = 'Obrigatório';
-  if (!b.link_role) fieldErr.link_role = 'Obrigatório';
+  if (personType === 'pj' && !b.link_role) fieldErr.link_role = 'Obrigatório';
   let files;
   try {
     files = { logo: checkFile(req.files?.logo?.[0], IMG, 'Logomarca'), identity: checkFile(req.files?.identity?.[0], DOC, 'Documento do responsável'), link_doc: checkFile(req.files?.link_doc?.[0], DOC, 'Comprovante de vínculo') };
@@ -174,7 +182,7 @@ r.post('/cadastro/2', upload(5).fields([{ name: 'logo', maxCount: 1 }, { name: '
   const source = lookupData ? lookupData.source : 'manual';
   await db.tx(async () => {
     if (!org) {
-      const id = Number((await db.run('INSERT INTO organizations(cnpj,legal_name,trade_name,cnpj_status,address,cnpj_source,cnpj_checked_at,status) VALUES(?,?,?,?,?,?,?,?)', cnpj, b.legal_name?.trim(), b.trade_name?.trim(), lookupData?.cnpj_status || null, address, source, lookupData?.at || null, 'onboarding')).lastInsertRowid);
+      const id = Number((await db.run('INSERT INTO organizations(person_type,cnpj,cpf,legal_name,trade_name,cnpj_status,address,cnpj_source,cnpj_checked_at,status) VALUES(?,?,?,?,?,?,?,?,?,?)', personType, cnpj, cpf, b.legal_name?.trim(), b.trade_name?.trim(), lookupData?.cnpj_status || null, address, source, lookupData?.at || null, 'onboarding')).lastInsertRowid);
       await db.run("INSERT INTO org_members(org_id,user_id,role) VALUES(?,?,'owner')", id, req.user.id);
       await saveDraft(req.user.id, { org_id: id });
       org = await db.one('SELECT * FROM organizations WHERE id=?', id);
@@ -182,7 +190,7 @@ r.post('/cadastro/2', upload(5).fields([{ name: 'logo', maxCount: 1 }, { name: '
     } else {
       // Se os dados vieram do fornecedor e o usuário alterou a razão social, passa a ser manual
       const src = lookupData && lookupData.legal_name === b.legal_name?.trim() ? source : (org.cnpj_source !== 'manual' && org.legal_name === b.legal_name?.trim() && org.cnpj === cnpj ? org.cnpj_source : 'manual');
-      await db.run('UPDATE organizations SET cnpj=?, legal_name=?, trade_name=?, address=?, cnpj_source=?, cnpj_status=COALESCE(?,cnpj_status) WHERE id=?', cnpj, b.legal_name?.trim(), b.trade_name?.trim(), address, src, lookupData?.cnpj_status || null, org.id);
+      await db.run('UPDATE organizations SET person_type=?, cnpj=?, cpf=?, legal_name=?, trade_name=?, address=?, cnpj_source=?, cnpj_status=COALESCE(?,cnpj_status) WHERE id=?', personType, cnpj, cpf, b.legal_name?.trim(), b.trade_name?.trim(), address, src, lookupData?.cnpj_status || null, org.id);
       await audit(req, 'org.updated', { orgId: org.id, entity: 'organization', entityId: org.id });
     }
     if (files.logo) await db.run('UPDATE organizations SET logo_path=? WHERE id=?', store(files.logo, { isPrivate: false }), org.id);
@@ -192,7 +200,7 @@ r.post('/cadastro/2', upload(5).fields([{ name: 'logo', maxCount: 1 }, { name: '
       await db.run('INSERT INTO documents(org_id,user_id,kind,storage_key,original_name,mime,size) VALUES(?,?,?,?,?,?,?)', org.id, req.user.id, kind, key, f.originalname.slice(0, 120), f.mimetype, f.size);
       await audit(req, 'document.uploaded', { orgId: org.id, entity: 'document', detail: { kind } });
     }
-    await saveDraft(req.user.id, { data: { link_role: b.link_role } });
+    await saveDraft(req.user.id, { data: { link_role: personType === 'pf' ? 'titular' : b.link_role } });
   });
   if (strict && (await settings()).require_identity_document && !await db.one("SELECT 1 FROM documents WHERE org_id=? AND kind='identity'", org.id)) return render(req, res, 2, { errors: ['Envie o documento oficial com foto do responsável.'], fieldErr: { identity: 'Obrigatório' } });
   await afterSave(req, res, 2, b.acao);

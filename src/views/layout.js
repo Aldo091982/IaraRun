@@ -23,7 +23,16 @@ function nav(req) {
       <select id="ctx" name="context" onchange="this.form.submit()">${ctxOptions}</select>
       <noscript><button class="btn btn-sm">Trocar</button></noscript>
     </form>
-    <form method="post" action="/sair">${csrf(req)}<button class="linklike">Sair</button></form>`;
+    <a class="nav-user" href="/minha-conta/perfil" title="Meu perfil">${avatar(u, 'sm')}<span class="nav-user-name">${String(u.name || '').trim().split(/\s+/).find((p) => !/^\[?demo\]?$/i.test(p)) || ''}</span></a>
+    <form method="post" action="/sair" class="logout-form">${csrf(req)}<button class="btn-logout"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>Sair</button></form>`;
+}
+
+/** Foto de perfil ou, sem foto, as iniciais do nome. */
+function avatar(u, size = 'md') {
+  const initials = String(u?.name || '?').trim().split(/\s+/).filter((p) => !/^\[?demo\]?$/i.test(p)).slice(0, 2).map((p) => p[0]).join('').toUpperCase() || '?';
+  return u?.avatar_path
+    ? html`<img class="avatar avatar-${size}" src="/media/${u.avatar_path}" alt="" loading="lazy">`
+    : html`<span class="avatar avatar-${size} avatar-initials" aria-hidden="true">${initials}</span>`;
 }
 
 const csrf = (req) => html`<input type="hidden" name="_csrf" value="${req.csrfToken || ''}">`;
@@ -95,4 +104,4 @@ function table(headers, rows, { emptyMsg = 'Nenhum registro.' } = {}) {
 }
 const errorsBox = (errs) => (errs && errs.length ? html`<div class="alert alert-error" role="alert"><strong>Corrija os itens abaixo para continuar:</strong><ul>${errs.map((e) => html`<li>${e}</li>`)}</ul></div>` : '');
 
-module.exports = { page, csrf, badge, field, empty, tip, steps, table, errorsBox, APP_NAME, ASSET_V };
+module.exports = { page, csrf, badge, field, empty, tip, steps, table, errorsBox, avatar, APP_NAME, ASSET_V };

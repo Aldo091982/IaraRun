@@ -4,7 +4,7 @@ const express = require('express');
 const db = require('../db');
 const config = require('../config');
 const { html, raw, brl, fmtDateTime, json, UserError, NotFound, nowIso } = require('../lib/util');
-const { fmtCnpj } = require('../lib/docs');
+const { fmtCnpj, orgDoc } = require('../lib/docs');
 const { ORG_STATUS, ownerOf, refreshStatus } = require('../lib/orgs');
 const { publicStatus, PUBLIC_STATUS } = require('../lib/events');
 const { MODE_LABEL } = require('../lib/payments');
@@ -14,7 +14,7 @@ const { csrf, field, badge, table, tip } = require('../views/layout');
 
 const r = express.Router();
 r.use(requireAdmin);
-const nav = (active) => html`<h1>Administração</h1><nav class="subnav" aria-label="Administração">${[['/admin', 'Visão geral'], ['/admin/organizadores', 'Organizadores'], ['/admin/usuarios', 'Usuários'], ['/admin/eventos', 'Eventos'], ['/admin/suporte', 'Suporte'], ['/admin/parametros', 'Parâmetros'], ['/admin/integracoes', 'Integrações'], ['/admin/auditoria', 'Auditoria']].map(([h, l]) => html`<a href="${h}" ${active === h ? raw('aria-current="page"') : ''}>${l}</a>`)}</nav>`;
+const nav = (active) => html`<h1>Administração</h1><nav class="subnav" aria-label="Administração">${[['/admin', 'Visão geral'], ['/admin/organizadores', 'Organizadores'], ['/admin/usuarios', 'Usuários'], ['/admin/eventos', 'Eventos'], ['/admin/suporte', 'Suporte'], ['/admin/parametros', 'Parâmetros'], ['/admin/integracoes', 'Integrações'], ['/admin/mensagens', 'Mensagens'], ['/admin/auditoria', 'Auditoria']].map(([h, l]) => html`<a href="${h}" ${active === h ? raw('aria-current="page"') : ''}>${l}</a>`)}</nav>`;
 
 r.get('/', async (req, res) => {
   const c = await db.one(`SELECT (SELECT COUNT(*) FROM users) users, (SELECT COUNT(*) FROM organizations) orgs, (SELECT COUNT(*) FROM organizations WHERE status='verification_pending') pending,
@@ -28,7 +28,7 @@ r.get('/organizadores', async (req, res) => {
   const st = req.query.status;
   const orgs = await db.all(`SELECT o.*, (SELECT COUNT(*) FROM documents d WHERE d.org_id=o.id AND d.status='submitted') docs FROM organizations o ${st ? 'WHERE o.status=?' : ''} ORDER BY o.id DESC`, ...(st ? [st] : []));
   res.page({ title: 'Organizadores', wide: true, body: html`${nav('/admin/organizadores')}<form class="inline-filters filters">${field('status', 'Situação', { value: st, options: [['', 'Todas'], ...Object.entries(ORG_STATUS).map(([k, v]) => [k, v.label])] })}<button class="btn">Filtrar</button></form>
-  ${table(['Empresa', 'CNPJ', 'Origem dos dados', 'Situação', 'Docs a analisar', 'Recebimento', ''], orgs.map((o) => [o.trade_name || o.legal_name || '—', fmtCnpj(o.cnpj), o.cnpj_source === 'manual' ? badge('Manual', 'warn') : badge('Consulta cadastral', 'info'), badge(ORG_STATUS[o.status].label, ORG_STATUS[o.status].tone), String(o.docs), o.mp_status, html`<a href="/admin/organizadores/${o.id}">Analisar</a>`]))}` });
+  ${table(['Organizador', 'Documento', 'Origem dos dados', 'Situação', 'Docs a analisar', 'Recebimento', ''], orgs.map((o) => [o.trade_name || o.legal_name || '—', orgDoc(o), o.cnpj_source === 'manual' ? badge('Manual', 'warn') : badge('Consulta cadastral', 'info'), badge(ORG_STATUS[o.status].label, ORG_STATUS[o.status].tone), String(o.docs), o.mp_status, html`<a href="/admin/organizadores/${o.id}">Analisar</a>`]))}` });
 });
 r.get('/organizadores/:id', async (req, res) => {
   const o = await db.one('SELECT * FROM organizations WHERE id=?', Number(req.params.id)); if (!o) throw new NotFound();
@@ -37,7 +37,7 @@ r.get('/organizadores/:id', async (req, res) => {
   const reqs = await db.all("SELECT a.*, u.name, u.email FROM org_access_requests a JOIN users u ON u.id=a.user_id WHERE a.org_id=? AND a.status='pending'", o.id);
   const hist = await db.all("SELECT l.*, u.name FROM audit_log l LEFT JOIN users u ON u.id=l.user_id WHERE l.org_id=? AND (l.action ILIKE 'admin.%' OR l.action ILIKE 'document.%') ORDER BY l.id DESC LIMIT 30", o.id);
   res.page({ title: o.trade_name, wide: true, body: html`${nav('/admin/organizadores')}<section class="card"><h2>${o.trade_name} ${badge(ORG_STATUS[o.status].label, ORG_STATUS[o.status].tone)}</h2>
-  <dl class="defs"><dt>Razão social</dt><dd>${o.legal_name}</dd><dt>CNPJ</dt><dd>${fmtCnpj(o.cnpj)} — ${o.cnpj_source === 'manual' ? 'informado manualmente: conferir em fonte oficial' : `${o.cnpj_source} em ${fmtDateTime(o.cnpj_checked_at)}`}${o.cnpj_status ? ` · ${o.cnpj_status}` : ''}</dd>
+  <dl class="defs"><dt>${o.person_type === 'pf' ? 'Nome completo' : 'Razão social'}</dt><dd>${o.legal_name}</dd><dt>${o.person_type === 'pf' ? 'Tipo' : 'Documento'}</dt><dd>${o.person_type === 'pf' ? 'Pessoa física — ' : ''}${orgDoc(o)} — ${o.cnpj_source === 'manual' ? 'informado manualmente: conferir em fonte oficial' : `${o.cnpj_source} em ${fmtDateTime(o.cnpj_checked_at)}`}${o.cnpj_status ? ` · ${o.cnpj_status}` : ''}</dd>
   <dt>Endereço</dt><dd>${a.street || ''} ${a.number || ''} ${a.district || ''} ${a.city}/${a.state} ${a.zip || ''}</dd><dt>Responsável</dt><dd>${owner?.name} — ${owner?.email} ${owner?.email_verified_at ? badge('e-mail confirmado', 'ok') : badge('e-mail pendente', 'warn')}</dd>
   <dt>Atendimento</dt><dd>${o.support_email} · ${o.support_phone}</dd></dl></section>
   <section class="card"><h2>Documentos (acesso registrado)</h2>${tip('Abrir um documento gera registro de auditoria. "Enviado" não é "verificado": marque como verificado somente após conferência.')}
@@ -179,19 +179,111 @@ r.post('/parametros', async (req, res) => {
   res.flash('success', 'Parâmetros salvos.');
   res.redirect(303, '/admin/parametros');
 });
+// ---------- Integrações: configuradas pela própria tela ----------
+const integrations = require('../lib/integrations');
+const delivery = require('../lib/delivery');
+
+function integrationStatus(id) {
+  const m = config;
+  switch (id) {
+    case 'mercadopago': return [MODE_LABEL[m.mp.mode], m.mp.mode === 'mp_live' ? 'ok' : m.mp.mode === 'mp_test' ? 'info' : m.mp.mode === 'simulator' ? 'warn' : 'danger'];
+    case 'paypal': return [{ simulator: 'Simulador local (demonstração)', test: 'Sandbox (testes)', live: 'Produção', blocked_undecided: 'Bloqueado: defina quem recebe o dinheiro', disabled: 'Não configurado' }[m.paypal.mode], m.paypal.mode === 'live' ? 'ok' : m.paypal.mode === 'test' ? 'info' : 'warn'];
+    case 'picpay': return [{ simulator: 'Simulador local (demonstração)', live: 'Produção', blocked_undecided: 'Bloqueado: defina quem recebe o dinheiro', disabled: 'Não configurado' }[m.picpay.mode], m.picpay.mode === 'live' ? 'ok' : 'warn'];
+    case 'payment_methods': return [m.paymentMethods.length ? m.paymentMethods.map((x) => ({ mercadopago: 'Mercado Pago', paypal: 'PayPal', picpay: 'PicPay' }[x])).join(', ') : 'Nenhum meio selecionado', m.paymentMethods.length ? 'ok' : 'danger'];
+    case 'mail': return m.mail.mode === 'smtp' ? [`Enviando por ${m.mail.smtpHost}`, 'ok'] : ['Não configurado: e-mails ficam só registrados', 'warn'];
+    case 'messaging': return m.messaging.mode === 'twilio' ? ['Twilio ativo', 'ok'] : ['Desativado', 'muted'];
+    case 'google': return [{ live: 'Ativo', simulator: 'Simulador local (demonstração)', disabled: 'Desativado: botão do Google oculto' }[m.google.mode], m.google.mode === 'live' ? 'ok' : 'warn'];
+    case 'cnpj': return m.cnpj.provider === 'http' && m.cnpj.url ? [`Fornecedor: ${m.cnpj.name}`, 'ok'] : ['Manual: dados ficam pendentes de verificação', 'warn'];
+    case 'analytics': return m.analytics.ga || m.analytics.metaPixel ? ['Configurado (só com consentimento)', 'ok'] : ['Não configurado', 'muted'];
+    default: return ['—', 'muted'];
+  }
+}
+
+function integrationField(f) {
+  const id = `f-${f.name}`;
+  const hint = f.hint ? html`<small class="hint">${f.hint}</small>` : '';
+  const envNote = f.fromEnv ? html`<small class="hint">Usando o valor padrão do servidor. Preencha aqui para substituir.</small>` : '';
+  if (f.type === 'secret') {
+    const state = f.unreadable ? badge('Salvo, mas ilegível: informe de novo', 'danger') : f.isSet ? badge(f.fromEnv ? 'Configurado no servidor (.env)' : 'Configurado', 'ok') : badge('Não configurado', 'muted');
+    return html`<div class="field"><label for="${id}">${f.label} ${state}</label>
+      <input type="password" id="${id}" name="${f.name}" autocomplete="new-password" placeholder="${f.isSet ? 'Deixe em branco para manter o atual' : ''}">${hint}
+      ${f.savedSet ? html`<label class="inline-check"><input type="checkbox" name="${f.name}__remover" value="1"> Remover o valor salvo</label>` : ''}</div>`;
+  }
+  if (f.type === 'checkboxes') {
+    const cur = Array.isArray(f.value) && f.value.length ? f.value : f.effective || [];
+    return html`<fieldset class="check-group"><legend>${f.label}</legend>${f.options.map(([v, l]) => html`<label class="inline-check"><input type="checkbox" name="${f.name}" value="${v}" ${cur.includes(v) ? 'checked' : ''}> ${l}</label>`)}${hint}</fieldset>`;
+  }
+  if (f.type === 'select') {
+    const cur = f.value !== '' ? f.value : (f.effective ?? '');
+    return html`<div class="field"><label for="${id}">${f.label}</label><select id="${id}" name="${f.name}">${f.options.map(([v, l]) => html`<option value="${v}" ${String(cur) === v ? 'selected' : ''}>${l}</option>`)}</select>${hint}${envNote}</div>`;
+  }
+  return html`<div class="field"><label for="${id}">${f.label}</label><input type="${f.type === 'number' ? 'number' : 'text'}" id="${id}" name="${f.name}" value="${f.value ?? ''}" placeholder="${f.fromEnv ? String(f.effective ?? '') : f.placeholder || ''}" autocomplete="off">${hint}${envNote}</div>`;
+}
+
 r.get('/integracoes', async (req, res) => {
+  const open = String(req.query.abrir || '');
+  const groups = [...new Set(integrations.SPEC.map((s) => s.group))];
+  const cards = {};
+  for (const s of integrations.SPEC) {
+    const fields = await integrations.formState(s.id);
+    const [label, tone] = integrationStatus(s.id);
+    const tests = s.id === 'mail' ? html`<form method="post" action="/admin/integracoes/mail/teste" class="test-form">${csrf(req)}<label for="t-mail">Enviar e-mail de teste para</label><div class="test-row"><input type="email" id="t-mail" name="to" value="${req.user.email}" required><button class="btn btn-ghost">Enviar teste</button></div></form>`
+      : s.id === 'messaging' ? html`<form method="post" action="/admin/integracoes/messaging/teste" class="test-form">${csrf(req)}<label for="t-phone">Enviar mensagem de teste para</label><div class="test-row"><input type="tel" id="t-phone" name="to" placeholder="(11) 99999-0000" required><select name="channel" aria-label="Canal"><option value="whatsapp">WhatsApp</option><option value="sms">SMS</option></select><button class="btn btn-ghost">Enviar teste</button></div></form>` : '';
+    cards[s.id] = html`<details class="card integration" id="int-${s.id}" ${open === s.id ? 'open' : ''}>
+      <summary><span class="int-title">${s.title}</span>${badge(label, tone)}</summary>
+      <p class="muted">${s.help.replaceAll('{BASE}', config.baseUrl)}</p>
+      <form method="post" action="/admin/integracoes/${s.id}" autocomplete="off">${csrf(req)}${fields.map(integrationField)}<button class="btn">Salvar ${s.title}</button></form>
+      ${tests}</details>`;
+  }
   const wh = await db.all('SELECT * FROM webhook_events ORDER BY id DESC LIMIT 30');
-  const rows = [
-    ['Pagamentos (Mercado Pago)', MODE_LABEL[config.mp.mode], config.mp.mode === 'mp_live' ? 'ok' : config.mp.mode === 'simulator' ? 'warn' : 'info'],
-    ['Modelo de recebimento', { undecided: 'PENDENTE: decidir plataforma × conta do organizador antes de transações reais', platform: 'Plataforma recebe e repassa', organizer: 'Conta do organizador (OAuth)' }[config.mp.receiverModel], config.mp.receiverModel === 'undecided' ? 'danger' : 'ok'],
-    ['Assinatura de webhooks', config.mp.webhookSecret ? 'Chave configurada' : config.mp.mode === 'simulator' ? 'Simulador (chave local)' : 'NÃO configurada — webhooks serão recusados', config.mp.webhookSecret ? 'ok' : 'warn'],
-    ['Consulta de CNPJ', config.cnpj.provider ? `Fornecedor: ${config.cnpj.name}` : 'Não configurada — cadastro manual pendente de verificação', config.cnpj.provider ? 'ok' : 'warn'],
-    ['E-mail', 'Caixa de saída local (SMTP/provedor transacional pendente)', 'warn'],
-    ['Google Analytics / Meta Pixel', config.analytics.ga || config.analytics.metaPixel ? 'Configurado (ativado só com consentimento)' : 'Não configurado', 'info'],
-    ['WhatsApp oficial, cronometragem por API, seguro de inscrição', 'Etapas futuras — não operacionais', 'muted'],
-  ];
-  res.page({ title: 'Integrações', wide: true, body: html`${nav('/admin/integracoes')}<section class="card">${table(['Integração', 'Situação'], rows.map(([a, b, t]) => [a, badge(b, t)]))}</section>
+  res.page({ title: 'Integrações', wide: true, body: html`${nav('/admin/integracoes')}
+  ${tip('Senhas, tokens e chaves ficam criptografados no banco e nunca aparecem de volta na tela. As alterações valem na hora, sem reiniciar o site, e ficam registradas na auditoria.')}
+  ${groups.map((g) => html`<h2 class="int-group">${g}</h2>${integrations.SPEC.filter((s) => s.group === g).map((s) => cards[s.id])}`)}
   <section class="card"><h2>Últimos webhooks recebidos</h2>${table(['Data', 'Provedor', 'Recurso', 'Assinatura', 'Resultado'], wh.map((w) => [fmtDateTime(w.received_at), w.provider, w.resource_id, w.signature_ok ? 'válida' : 'inválida', w.result || '—']))}</section>` });
+});
+
+r.post('/integracoes/mail/teste', async (req, res) => {
+  const to = String(req.body.to || '').trim();
+  try { await delivery.testEmail(to); res.flash('success', `E-mail de teste enviado para ${to}. Confira a caixa de entrada e o spam.`); }
+  catch (e) { res.flash('error', `Falha no envio: ${String(e.message).slice(0, 200)}`); }
+  await audit(req, 'integration.test', { entity: 'integration', entityId: 'mail' });
+  res.redirect(303, '/admin/integracoes?abrir=mail#int-mail');
+});
+r.post('/integracoes/messaging/teste', async (req, res) => {
+  const channel = req.body.channel === 'sms' ? 'sms' : 'whatsapp';
+  try { await delivery.testMessage(channel, req.body.to); res.flash('success', `Mensagem de teste enviada por ${channel === 'sms' ? 'SMS' : 'WhatsApp'}.`); }
+  catch (e) { res.flash('error', `Falha no envio: ${String(e.message).slice(0, 200)}`); }
+  await audit(req, 'integration.test', { entity: 'integration', entityId: `messaging:${channel}` });
+  res.redirect(303, '/admin/integracoes?abrir=messaging#int-messaging');
+});
+r.post('/integracoes/:id', async (req, res) => {
+  const id = String(req.params.id);
+  if (!integrations.byId[id]) throw new NotFound();
+  const summary = await integrations.save(id, req.body);
+  await audit(req, 'integration.updated', { entity: 'integration', entityId: id, detail: summary });
+  res.flash('success', `${integrations.byId[id].title}: configuração salva e aplicada.`);
+  res.redirect(303, `/admin/integracoes?abrir=${encodeURIComponent(id)}#int-${id}`);
+});
+
+// Mensagens enviadas: só destinatário, assunto e situação (o conteúdo pode ter links de acesso pessoais)
+r.get('/mensagens', async (req, res) => {
+  const mails = await db.all('SELECT id, to_email, subject, category, status, attempts, error, created_at, sent_at FROM outbox ORDER BY id DESC LIMIT 100');
+  const msgs = await db.all('SELECT id, channel, to_phone, category, status, error, created_at, sent_at FROM message_log ORDER BY id DESC LIMIT 100');
+  const ST = { local: ['Só registrado (sem SMTP)', 'muted'], queued: ['Na fila', 'info'], sending: ['Enviando', 'info'], retry: ['Nova tentativa', 'warn'], sent: ['Enviado', 'ok'], failed: ['Falhou', 'danger'] };
+  const st = (s) => badge(...(ST[s] || [s, 'muted']));
+  const maskPhone = (p) => String(p || '').replace(/(\+\d{2})(\d{2})\d+(\d{4})$/, '$1 $2 •••• $3');
+  res.page({ title: 'Mensagens', wide: true, body: html`${nav('/admin/mensagens')}
+  <section class="card"><h2>E-mails</h2>${table(['Data', 'Para', 'Assunto', 'Tipo', 'Situação', 'Tentativas', 'Erro'], mails.map((m) => [fmtDateTime(m.created_at), m.to_email, m.subject, m.category, st(m.status), String(m.attempts), m.error || '—']), { emptyMsg: 'Nenhum e-mail registrado.' })}
+  ${mails.some((m) => m.status === 'failed') ? html`<form method="post" action="/admin/mensagens/reenviar">${csrf(req)}<button class="btn btn-ghost">Tentar de novo os que falharam</button></form>` : ''}</section>
+  <section class="card"><h2>SMS e WhatsApp</h2>${table(['Data', 'Canal', 'Para', 'Tipo', 'Situação', 'Erro'], msgs.map((m) => [fmtDateTime(m.created_at), m.channel === 'sms' ? 'SMS' : 'WhatsApp', maskPhone(m.to_phone), m.category, st(m.status), m.error || '—']), { emptyMsg: 'Nenhuma mensagem registrada.' })}</section>` });
+});
+r.post('/mensagens/reenviar', async (req, res) => {
+  const r1 = await db.run("UPDATE outbox SET status='retry', attempts=0 WHERE status='failed'");
+  await db.run(`UPDATE message_log m SET status='queued', attempts=0 FROM users u WHERE u.id=m.user_id AND m.status='failed' AND COALESCE((u.notify_prefs::jsonb ->> m.channel), 'false') = 'true'`);
+  delivery.kick();
+  await audit(req, 'messages.retry', { detail: { emails: r1.changes } });
+  res.flash('info', 'Mensagens com falha voltaram para a fila de envio.');
+  res.redirect(303, '/admin/mensagens');
 });
 r.get('/auditoria', async (req, res) => {
   const q = req.query;

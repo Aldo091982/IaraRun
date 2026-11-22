@@ -27,7 +27,7 @@ cp .env.example .env        # ajuste se quiser; sem .env roda em desenvolvimento
 npm run migrate             # cria/atualiza o banco do ambiente (plataforma_development)
 npm run seed                # dados FICTÍCIOS de demonstração (bloqueado em produção)
 npm start                   # http://localhost:3000
-npm test                    # 38 testes de ponta a ponta, cada arquivo em um banco PostgreSQL temporário
+npm test                    # 47 testes de ponta a ponta, cada arquivo em um banco PostgreSQL temporário
 ```
 
 Contas de demonstração (senha `demo12345`, somente fora de produção):
@@ -43,6 +43,10 @@ Fora de produção:
 - Os e-mails ficam em `/dev/caixa-de-saida`, incluindo os links de confirmação e de recuperação de senha.
 - "Continuar com o Google" abre um simulador local (sem credenciais do Google), onde você digita o e-mail da conta.
 - O pagamento abre `/dev/pagamento-simulado/<pedido>`, com aprovar Pix/cartão, recusar, deixar pendente, valor divergente e reenvio de webhook duplicado. Uma faixa no topo de cada página identifica o ambiente e o modo de pagamento.
+
+## Integrações pela tela
+
+Em **Administração › Integrações** configuram-se Mercado Pago, PayPal, PicPay, meios de pagamento oferecidos, e-mail (SMTP), SMS/WhatsApp (Twilio), login com Google, consulta de CNPJ e medição. Senhas e chaves ficam criptografadas no banco (AES-256-GCM), nunca voltam para a tela e as mudanças valem na hora. E-mail e SMS/WhatsApp têm botão de teste. **Administração › Mensagens** mostra a situação de cada envio (sem o conteúdo). O arquivo `.env` continua valendo como padrão quando o campo da tela está vazio.
 
 ## Ambientes
 

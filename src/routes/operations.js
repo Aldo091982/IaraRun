@@ -142,7 +142,7 @@ r.get('/eventos/:id/comunicacao', async (req, res) => {
   const sent = await db.all("SELECT * FROM audit_log WHERE org_id=? AND action='communication.sent' AND entity_id=? ORDER BY id DESC LIMIT 20", req.org.id, String(e.id));
   res.page({ title: 'Comunicação', wide: true, body: html`${await tabs(req, e, '/comunicacao')}<section class="card"><h2>Aviso aos inscritos confirmados</h2>
   ${tip('Use para informações operacionais do evento (alterações, retirada de kit, resultados). Respeita as preferências de notificação dos atletas. Campanhas promocionais exigem consentimento e ficam para etapa posterior.')}
-  <form method="post" action="/organizador/eventos/${e.id}/comunicacao">${csrf(req)}${field('modality_id', 'Destinatários', { options: [['', 'Todos os confirmados'], ...mods.map((m) => [m.id, `Somente ${m.name}`])] })}${field('subject', 'Assunto', { required: true })}${field('body', 'Mensagem', { type: 'textarea', rows: 6, required: true })}<button class="btn">Enviar por e-mail</button></form></section>
+  <form method="post" action="/organizador/eventos/${e.id}/comunicacao">${csrf(req)}${field('modality_id', 'Destinatários', { options: [['', 'Todos os confirmados'], ...mods.map((m) => [m.id, `Somente ${m.name}`])] })}${field('subject', 'Assunto', { required: true })}${field('body', 'Mensagem', { type: 'textarea', rows: 6, required: true })}${config.messaging.mode === 'twilio' ? field('also_phone', 'Também enviar por WhatsApp/SMS para quem autorizou esse tipo de aviso', { type: 'checkbox' }) : ''}<button class="btn">Enviar</button></form></section>
   <section class="card"><h2>Histórico</h2>${table(['Data', 'Assunto', 'Destinatários'], sent.map((s) => { const d = json(s.detail); return [fmtDateTime(s.created_at), d.subject, String(d.count)]; }))}</section>` });
 });
 r.post('/eventos/:id/comunicacao', async (req, res) => {
@@ -150,8 +150,14 @@ r.post('/eventos/:id/comunicacao', async (req, res) => {
   if (!req.body.subject || !req.body.body) throw new UserError('Informe assunto e mensagem.');
   const list = await db.all(`SELECT DISTINCT COALESCE(g.email, u.email) email FROM registrations g JOIN users u ON u.id=g.buyer_user_id WHERE g.event_id=? AND g.status='confirmed' ${req.body.modality_id ? 'AND g.modality_id=?' : ''}`, e.id, ...(req.body.modality_id ? [Number(req.body.modality_id)] : []));
   let n = 0; for (const x of list) if (x.email && await sendMail(x.email, `[${e.name}] ${req.body.subject}`, req.body.body, 'event_updates')) n++;
-  await audit(req, 'communication.sent', { orgId: req.org.id, entity: 'event', entityId: e.id, detail: { subject: req.body.subject, count: n } });
-  res.flash('success', `Mensagem enviada para ${n} destinatário(s).`);
+  let m = 0;
+  if (req.body.also_phone) {
+    const users = await db.all(`SELECT DISTINCT g.buyer_user_id id FROM registrations g WHERE g.event_id=? AND g.status='confirmed' ${req.body.modality_id ? 'AND g.modality_id=?' : ''}`, e.id, ...(req.body.modality_id ? [Number(req.body.modality_id)] : []));
+    const prefsOk = async (id) => { const u = await db.one('SELECT notify_prefs FROM users WHERE id=?', id); return json(u?.notify_prefs, {}).event_updates !== false; };
+    for (const x of users) if (await prefsOk(x.id)) m += await require('../lib/delivery').queueUserMessage(x.id, `[${e.name}] ${req.body.subject}: ${req.body.body}`.slice(0, 1400), { category: 'event_updates' });
+  }
+  await audit(req, 'communication.sent', { orgId: req.org.id, entity: 'event', entityId: e.id, detail: { subject: req.body.subject, count: n, phone: m } });
+  res.flash('success', `Mensagem enviada para ${n} destinatário(s) por e-mail${m ? ` e ${m} por WhatsApp/SMS` : ''}.`);
   res.redirect(303, `/organizador/eventos/${e.id}/comunicacao`);
 });
 
@@ -200,7 +206,8 @@ r.post('/eventos/:id/checkin/:gid/kit', async (req, res) => {
     throw new UserError(`Kit JÁ ENTREGUE em ${fmtDateTime(k.picked_at, e.timezone)} por ${k.op}${k.pt ? ` (${k.pt})` : ''}${k.third_party_name ? `, retirado por ${k.third_party_name}` : ''}.`, 409);
   }
   await audit(req, 'kit.delivered', { orgId: req.org.id, entity: 'registration', entityId: g.id, detail: { point, third: !!third } });
-  const u = await db.one('SELECT email FROM users WHERE id=?', g.buyer_user_id);
+  const u = await db.one('SELECT id, email FROM users WHERE id=?', g.buyer_user_id);
+  await require('../lib/delivery').queueUserMessage(u.id, `${e.name}: kit da inscrição nº ${g.bib} retirado${third ? ` por ${third}` : ''}.`);
   await sendMail(u.email, `Kit retirado — ${e.name}`, `O kit da inscrição nº ${g.bib} foi retirado${third ? ` por ${third}` : ''} em ${fmtDateTime(nowIso(), e.timezone)}.`, 'kit');
   res.flash('success', `Kit de ${g.name} entregue.`);
   if (point) res.setCookie('ponto', String(point), { maxAge: 864e5 });

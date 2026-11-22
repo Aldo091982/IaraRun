@@ -8,9 +8,9 @@ const { isCpf, digits, fmtCpf, isEmail } = require('../lib/docs');
 const { counts, currentLot } = require('../lib/events');
 const { currentPublished, RESULT_STATUS } = require('../lib/results');
 const { audit, recordConsent, sendMail } = require('../lib/core');
-const { requireUser } = require('../lib/guards');
+const { requireUser, upload, checkFile, store, csrfAfterMultipart } = require('../lib/guards');
 const { ORDER_STATUS } = require('./checkout');
-const { csrf, field, badge, table, tip, empty } = require('../views/layout');
+const { csrf, field, badge, table, tip, empty, avatar } = require('../views/layout');
 
 const r = express.Router();
 r.use(requireUser);
@@ -201,12 +201,36 @@ r.get('/favoritos', async (req, res) => {
 });
 r.get('/perfil', (req, res) => {
   const u = req.user;
-  res.page({ title: 'Perfil', body: html`<h1>Perfil</h1>${accountNav('/minha-conta/perfil')}<section class="card"><p class="muted">Usamos estes dados para preencher suas inscrições. Validação local de CPF (dígitos verificadores); não há verificação documental externa.</p>
+  res.page({ title: 'Perfil', body: html`<h1>Perfil</h1>${accountNav('/minha-conta/perfil')}
+  <section class="card photo-card"><h2>Foto de perfil</h2><div class="photo-row">${avatar(u, 'lg')}
+    <div class="photo-actions"><form method="post" action="/minha-conta/perfil/foto" enctype="multipart/form-data">${csrf(req)}
+      <label for="foto" class="btn btn-ghost btn-file">${u.avatar_path ? 'Trocar foto' : 'Enviar foto'}<input type="file" id="foto" name="foto" accept="image/png,image/jpeg,image/webp" required data-autosubmit data-preview="foto-prev"></label>
+      <noscript><button class="btn btn-sm">Enviar</button></noscript>
+      <small class="hint">JPG, PNG ou WEBP até 3 MB. Aparece no topo do site e no seu painel.</small></form>
+      ${u.avatar_path ? html`<form method="post" action="/minha-conta/perfil/foto/remover">${csrf(req)}<button class="linklike">Remover foto</button></form>` : ''}</div></div></section>
+  <section class="card"><p class="muted">Usamos estes dados para preencher suas inscrições. Validação local de CPF (dígitos verificadores); não há verificação documental externa.</p>
   <form method="post" action="/minha-conta/perfil">${csrf(req)}${field('name', 'Nome completo', { value: u.name, required: true })}
   <div class="row">${field('cpf', 'CPF', { value: u.cpf ? fmtCpf(u.cpf) : '' })}${field('birth_date', 'Nascimento', { type: 'date', value: u.birth_date })}${field('gender', 'Sexo', { value: u.gender, options: [['', '—'], ['F', 'Feminino'], ['M', 'Masculino']] })}</div>
   <div class="row">${field('phone', 'Telefone', { value: u.phone })}${field('city', 'Cidade', { value: u.city })}${field('state', 'UF', { value: u.state })}${field('shirt_size', 'Tamanho de camiseta preferido', { value: u.shirt_size })}</div>
   <div class="row">${field('emergency_name', 'Contato de emergência', { value: u.emergency_name })}${field('emergency_phone', 'Telefone de emergência', { value: u.emergency_phone })}</div>
   <button class="btn">Salvar</button></form></section>` });
+});
+const removePublicFile = (key) => { if (!key) return; try { require('node:fs').unlinkSync(require('node:path').join(config.publicUploadDir, require('node:path').basename(key))); } catch { /* já removido */ } };
+r.post('/perfil/foto', upload(3).single('foto'), csrfAfterMultipart, async (req, res) => {
+  const f = checkFile(req.file, ['image/png', 'image/jpeg', 'image/webp'], 'Foto');
+  if (!f) throw new UserError('Escolha uma imagem.');
+  const key = store(f, { isPrivate: false });
+  await db.run('UPDATE users SET avatar_path=? WHERE id=?', key, req.user.id);
+  removePublicFile(req.user.avatar_path);
+  await audit(req, 'user.avatar_updated', { entity: 'user', entityId: req.user.id });
+  res.flash('success', 'Foto atualizada.');
+  res.redirect(303, '/minha-conta/perfil');
+});
+r.post('/perfil/foto/remover', async (req, res) => {
+  await db.run('UPDATE users SET avatar_path=NULL WHERE id=?', req.user.id);
+  removePublicFile(req.user.avatar_path);
+  res.flash('success', 'Foto removida.');
+  res.redirect(303, '/minha-conta/perfil');
 });
 r.post('/perfil', async (req, res) => {
   const b = req.body;
@@ -221,13 +245,18 @@ r.get('/preferencias', (req, res) => {
   const p = json(req.user.notify_prefs, {});
   res.page({ title: 'Preferências', body: html`<h1>Privacidade e comunicação</h1>${accountNav('/minha-conta/preferencias')}<section class="card"><form method="post" action="/minha-conta/preferencias">${csrf(req)}
   <fieldset><legend>Notificações por e-mail</legend><p class="muted">Confirmações de inscrição e segurança da conta são sempre enviadas.</p>${Object.entries(NOTIFY).map(([k, l]) => field(`n_${k}`, l, { type: 'checkbox', value: p[k] !== false }))}</fieldset>
+  <fieldset><legend>WhatsApp e SMS</legend><p class="muted">Avisos sobre suas inscrições (confirmação, kit e mudanças no evento) no telefone ${req.user.phone ? html`<strong>${req.user.phone}</strong>` : html`<a href="/minha-conta/perfil">cadastre seu telefone no perfil</a>`}. Só enviamos se você autorizar.</p>
+    ${field('c_whatsapp', 'Receber avisos por WhatsApp', { type: 'checkbox', value: p.whatsapp === true })}${field('c_sms', 'Receber avisos por SMS', { type: 'checkbox', value: p.sms === true })}</fieldset>
   <fieldset><legend>Marketing</legend>${field('marketing', 'Receber divulgação de eventos e novidades', { type: 'checkbox', value: req.user.marketing_opt_in })}</fieldset>
   <fieldset><legend>Privacidade</legend>${field('public_results', 'Exibir meu nome nos resultados públicos (se desmarcado, aparece "perfil privado")', { type: 'checkbox', value: req.user.public_results })}</fieldset>
   <button class="btn">Salvar preferências</button></form>
-  <p class="muted">WhatsApp oficial: canal previsto para etapa futura, somente com seu consentimento específico.</p></section>` });
+</section>` });
 });
 r.post('/preferencias', async (req, res) => {
   const prefs = Object.fromEntries(Object.keys(NOTIFY).map((k) => [k, !!req.body[`n_${k}`]]));
+  const old = json(req.user.notify_prefs, {});
+  prefs.whatsapp = !!req.body.c_whatsapp; prefs.sms = !!req.body.c_sms;
+  for (const ch of ['whatsapp', 'sms']) if (prefs[ch] !== (old[ch] === true)) await recordConsent(req, req.user.id, prefs[ch] ? `channel_${ch}` : `channel_${ch}_revoked`, 'preferences');
   const mk = req.body.marketing ? 1 : 0;
   await db.run('UPDATE users SET notify_prefs=?, marketing_opt_in=?, public_results=? WHERE id=?', JSON.stringify(prefs), mk, req.body.public_results ? 1 : 0, req.user.id);
   if (mk !== req.user.marketing_opt_in) await recordConsent(req, req.user.id, mk ? 'marketing' : 'marketing_revoked', 'preferences');

@@ -540,6 +540,39 @@ const migrations = [
 )`,
   `CREATE INDEX user_identities_user ON user_identities(user_id)`,
 ],
+// 003 organizador pessoa física, foto de perfil, envio real de e-mail, SMS e WhatsApp
+[
+  `ALTER TABLE organizations ALTER COLUMN cnpj DROP NOT NULL`,
+  `ALTER TABLE organizations ADD COLUMN person_type TEXT NOT NULL DEFAULT 'pj'`,
+  `ALTER TABLE organizations ADD COLUMN cpf TEXT`,
+  `CREATE UNIQUE INDEX organizations_cpf_unique ON organizations(cpf) WHERE cpf IS NOT NULL`,
+  `ALTER TABLE users ADD COLUMN avatar_path TEXT`,
+  `ALTER TABLE outbox ADD COLUMN status TEXT NOT NULL DEFAULT 'local'`,
+  `ALTER TABLE outbox ADD COLUMN attempts BIGINT NOT NULL DEFAULT 0`,
+  `ALTER TABLE outbox ADD COLUMN sent_at TEXT`,
+  `ALTER TABLE outbox ADD COLUMN error TEXT`,
+  `CREATE INDEX outbox_status ON outbox(status)`,
+  `CREATE TABLE message_log (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT,
+  channel TEXT NOT NULL,
+  to_phone TEXT NOT NULL,
+  body TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'transactional',
+  status TEXT NOT NULL DEFAULT 'queued',
+  provider_id TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (${NOW}),
+  sent_at TEXT
+)`,
+  `CREATE INDEX message_log_user ON message_log(user_id)`,
+],
+// 004 fila de envio: reserva com horário (várias instâncias) e tentativas de SMS/WhatsApp
+[
+  `ALTER TABLE outbox ADD COLUMN claimed_at TEXT`,
+  `ALTER TABLE message_log ADD COLUMN claimed_at TEXT`,
+  `ALTER TABLE message_log ADD COLUMN attempts BIGINT NOT NULL DEFAULT 0`,
+],
 ];
 
 let pool = null;
@@ -643,6 +676,9 @@ async function tx(fn) {
   } finally { conn.release(); }
 }
 
+/** Executa fn fora de qualquer transação em andamento (para tarefas em segundo plano). */
+const detached = (fn) => als.exit(fn);
+
 async function setting(key, fallback) { const r = await one('SELECT value FROM settings WHERE "key"=?', key); return r ? JSON.parse(r.value) : fallback; }
 async function setSetting(key, value) { await run('INSERT INTO settings("key",value) VALUES(?,?) ON CONFLICT ("key") DO UPDATE SET value=EXCLUDED.value', key, JSON.stringify(value)); }
 async function close() { const p = pool; pool = null; if (p) await p.end(); }
@@ -657,4 +693,4 @@ async function dropTestDatabase() {
   await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
   await admin.end();
 }
-module.exports = { open, one, all, run, tx, setting, setSetting, close, dropTestDatabase, migrationsCount: migrations.length };
+module.exports = { open, one, all, run, tx, detached, setting, setSetting, close, dropTestDatabase, migrationsCount: migrations.length };

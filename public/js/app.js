@@ -36,6 +36,20 @@
     inp.addEventListener('change', upd); upd();
   });
 
+  // Cadastro do organizador: campos de empresa (CNPJ) ou pessoa física (CPF)
+  $$('form[data-person-form]').forEach((form) => {
+    const apply = () => {
+      const pt = (form.querySelector('input[name=person_type]:checked') || {}).value || 'pj';
+      $$('.only-pj', form).forEach((el) => { el.hidden = pt !== 'pj'; });
+      $$('.only-pf', form).forEach((el) => { el.hidden = pt !== 'pf'; });
+      $$('[data-label-pj]', form).forEach((inp) => { const lb = form.querySelector(`label[for="${inp.id}"]`); if (lb && lb.firstChild) lb.firstChild.textContent = pt === 'pf' ? inp.dataset.labelPf : inp.dataset.labelPj; });
+    };
+    $$('input[name=person_type]', form).forEach((r) => r.addEventListener('change', apply));
+    apply();
+  });
+  // Envio automático ao escolher o arquivo (ex.: foto de perfil)
+  $$('input[type=file][data-autosubmit]').forEach((inp) => inp.addEventListener('change', () => { if (inp.files.length) inp.form.submit(); }));
+
   // ---------- App instalável (PWA) ----------
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));

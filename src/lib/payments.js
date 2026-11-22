@@ -104,7 +104,7 @@ const providers = {
     },
     async getPayment(id) {
       const p = await mpFetch(`/v1/payments/${encodeURIComponent(id)}`);
-      const expectedCollector = process.env.MP_COLLECTOR_ID;
+      const expectedCollector = config.mp.collectorId;
       return {
         id: String(p.id), status: p.status, amount_cents: Math.round(Number(p.transaction_amount) * 100), currency: p.currency_id,
         external_reference: p.external_reference, method: p.payment_type_id, refunded_cents: Math.round(Number(p.transaction_amount_refunded || 0) * 100),

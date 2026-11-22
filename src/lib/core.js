@@ -32,8 +32,9 @@ async function consumeToken(t, type) {
 }
 
 /**
- * E-mail: nesta versão as mensagens vão para a caixa de saída (tabela outbox),
- * visível em /dev/caixa-de-saida fora de produção. Envio SMTP real: configuração externa pendente.
+ * E-mail: toda mensagem é registrada na caixa de saída (tabela outbox).
+ * Com servidor SMTP configurado (Administração › Integrações), ela entra na fila e é enviada
+ * em segundo plano (src/lib/delivery.js); sem SMTP, fica registrada como "local".
  * category 'marketing' respeita o consentimento; transacionais sempre são registradas.
  */
 async function sendMail(to, subject, body, category = 'transactional') {
@@ -46,8 +47,10 @@ async function sendMail(to, subject, body, category = 'transactional') {
     const prefs = json(u?.notify_prefs, {});
     if (prefs[category] === false) return false;
   }
-  await db.run('INSERT INTO outbox(to_email,subject,body,category) VALUES(?,?,?,?)', to, subject, body, category);
-  if (!config.isTest) console.log(`[e-mail:${category}] para=${to} assunto="${subject}"`);
+  const queued = config.mail.mode === 'smtp';
+  await db.run('INSERT INTO outbox(to_email,subject,body,category,status) VALUES(?,?,?,?,?)', to, subject, body, category, queued ? 'queued' : 'local');
+  if (!config.isTest) console.log(`[e-mail:${category}] para=${to} assunto="${subject}" ${queued ? '(na fila de envio)' : '(somente registrado: SMTP não configurado)'}`);
+  if (queued) require('./delivery').kick();
   return true;
 }
 

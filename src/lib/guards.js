@@ -29,7 +29,8 @@ const upload = (maxMb) => multer({ storage: multer.memoryStorage(), limits: { fi
 function checkFile(file, allowed, label) {
   if (!file) return null;
   const sig = SIGS[file.mimetype];
-  if (!allowed.includes(file.mimetype) || !sig || !sig.every((b, i) => file.buffer[i] === b)) throw new UserError(`${label}: formato não aceito. Envie ${allowed.map((m) => m.split('/')[1].toUpperCase()).join(', ')}.`);
+  const webpOk = file.mimetype !== 'image/webp' || file.buffer.slice(8, 12).toString('latin1') === 'WEBP';
+  if (!allowed.includes(file.mimetype) || !sig || !sig.every((b, i) => file.buffer[i] === b) || !webpOk) throw new UserError(`${label}: formato não aceito. Envie ${allowed.map((m) => m.split('/')[1].toUpperCase()).join(', ')}.`);
   return file;
 }
 const EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'application/pdf': '.pdf' };

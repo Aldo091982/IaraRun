@@ -20,4 +20,6 @@ const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(v || '').trim
 const isPhone = (v) => { const d = digits(v); return d.length >= 10 && d.length <= 13; };
 const isUrl = (v) => { try { const u = new URL(v); return ['http:', 'https:'].includes(u.protocol); } catch { return false; } };
 
-module.exports = { digits, isCpf, isCnpj, fmtCnpj, fmtCpf, isEmail, isPhone, isUrl };
+/** Documento do organizador: CNPJ (empresa/MEI) ou CPF (pessoa física). */
+const orgDoc = (o) => (o?.person_type === 'pf' ? `CPF ${fmtCpf(o.cpf || '')}` : `CNPJ ${fmtCnpj(o?.cnpj || '')}`);
+module.exports = { digits, isCpf, isCnpj, fmtCnpj, fmtCpf, isEmail, isPhone, isUrl, orgDoc };

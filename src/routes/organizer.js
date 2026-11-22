@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const db = require('../db');
 const config = require('../config');
 const { html, raw, brl, fmtDateTime, fmtDate, json, UserError, nowIso, toCsv, slugify, randomToken } = require('../lib/util');
-const { fmtCnpj, isEmail, isPhone, isUrl } = require('../lib/docs');
+const { fmtCnpj, isEmail, isPhone, isUrl, orgDoc } = require('../lib/docs');
 const { ORG_STATUS, PERMS, activation, assertCan, can, eventForOrg, ownerOf, refreshStatus } = require('../lib/orgs');
 const { publicStatus, PUBLIC_STATUS, eventStats } = require('../lib/events');
 const { MODE_LABEL, reconciliation, PAY_LABEL } = require('../lib/payments');
@@ -69,7 +69,7 @@ r.get('/empresa', async (req, res) => {
   const docs = await db.all('SELECT * FROM documents WHERE org_id=? ORDER BY id DESC', o.id);
   const isOwner = req.member.role === 'owner';
   res.page({ title: 'Empresa', wide: true, body: html`${orgHeader(req, '/organizador/empresa')}
-  <section class="card"><h2>Dados da empresa</h2><p>CNPJ ${fmtCnpj(o.cnpj)} · Origem: ${o.cnpj_source === 'manual' ? 'preenchimento manual (pendente de verificação)' : o.cnpj_source.replace('provider:', 'consulta cadastral — ')}${o.cnpj_status ? ` · Situação cadastral: ${o.cnpj_status}` : ''}</p>
+  <section class="card"><h2>${o.person_type === 'pf' ? 'Dados do organizador' : 'Dados da empresa'}</h2><p>${orgDoc(o)} · Origem: ${o.cnpj_source === 'manual' ? 'preenchimento manual (pendente de verificação)' : o.cnpj_source.replace('provider:', 'consulta cadastral — ')}${o.cnpj_status ? ` · Situação cadastral: ${o.cnpj_status}` : ''}</p>
   ${isOwner ? html`<form method="post" action="/organizador/empresa">${csrf(req)}
     <div class="row">${field('legal_name', 'Razão social', { value: o.legal_name, required: true })}${field('trade_name', 'Nome fantasia', { value: o.trade_name, required: true })}</div>
     <div class="row">${field('city', 'Cidade', { value: a.city, required: true })}${field('state', 'UF', { value: a.state, required: true })}${field('street', 'Endereço', { value: a.street })}</div>

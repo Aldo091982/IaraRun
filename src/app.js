@@ -11,6 +11,7 @@ function parseCookies(h = '') { return Object.fromEntries(h.split(';').map((c) =
 
 async function createApp() {
   await db.open();
+  await require('./lib/integrations').load(); // integrações salvas pela administração
   const app = express();
   app.set('trust proxy', config.isProd ? 1 : false);
   app.disable('x-powered-by');
